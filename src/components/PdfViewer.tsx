@@ -10,8 +10,10 @@ interface Props { reportId: string; onClose: () => void; onRefresh: () => void }
 
 export default function PdfViewer({ reportId, onClose, onRefresh }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const paper = useRef<HTMLDivElement>(null);
+  const displayedPage = useRef<{ document: PDFDocumentProxy; page: number } | null>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
   const [page, setPage] = useState(1);
   const [pageInput, setPageInput] = useState('1');
@@ -30,9 +32,15 @@ export default function PdfViewer({ reportId, onClose, onRefresh }: Props) {
   }, []);
 
   useEffect(() => {
-    const element = viewport.current!;
-    const observer = new ResizeObserver(() => setSize({ width: element.clientWidth, height: element.clientHeight }));
-    observer.observe(element);
+    const frame = stage.current!;
+    // Measure the fixed frame, never the PDF/loader's scrollable content. The
+    // viewport reserves its vertical gutter even while the first page loads.
+    const observer = new ResizeObserver(() => {
+      const width = viewport.current!.clientWidth;
+      const height = frame.clientHeight;
+      setSize(previous => previous.width === width && previous.height === height ? previous : { width, height });
+    });
+    observer.observe(frame);
     return () => observer.disconnect();
   }, []);
 
@@ -43,6 +51,7 @@ export default function PdfViewer({ reportId, onClose, onRefresh }: Props) {
     let loadTimer: ReturnType<typeof setTimeout> | undefined;
     setLoading(true); setError(''); setDocument(null); setPage(1); setZoom(null);
     paper.current?.replaceChildren();
+    displayedPage.current = null;
     void (async () => {
       try {
         if (!window.pilotDesktop?.readReport) throw new Error('데스크톱 앱에서 보고서를 열어 주세요.');
@@ -93,8 +102,13 @@ export default function PdfViewer({ reportId, onClose, onRefresh }: Props) {
 
   useEffect(() => { setPageInput(String(page)); }, [page]);
 
+  // Fixed zoom does not depend on the viewer size, so resizing the window must
+  // not redraw the same page or reset the reader's scroll position.
+  const fitWidth = zoom === null ? size.width : 0;
+  const fitHeight = zoom === null ? size.height : 0;
+
   useEffect(() => {
-    if (!document || !size.width || !size.height) return;
+    if (!document || (zoom === null && (!fitWidth || !fitHeight))) return;
     let active = true;
     let task: RenderTask | undefined;
     setRendering(true);
@@ -103,7 +117,7 @@ export default function PdfViewer({ reportId, onClose, onRefresh }: Props) {
         const pdfPage = await document.getPage(page);
         if (!active) return;
         const base = pdfPage.getViewport({ scale: 1 });
-        const scale = zoom ?? Math.max(.1, Math.min((size.width - 48) / base.width, (size.height - 48) / base.height, 2));
+        const scale = zoom ?? Math.max(.1, Math.min((fitWidth - 48) / base.width, (fitHeight - 48) / base.height, 2));
         const view = pdfPage.getViewport({ scale });
         const pixelRatio = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(12_000_000 / (view.width * view.height)));
         // Render offscreen so rapid page/zoom changes never reuse a running canvas.
@@ -114,8 +128,15 @@ export default function PdfViewer({ reportId, onClose, onRefresh }: Props) {
         task = pdfPage.render({ canvas, viewport: view, transform: [pixelRatio, 0, 0, pixelRatio, 0, 0] });
         await task.promise;
         if (!active) return;
+        const element = viewport.current!;
+        const samePage = displayedPage.current?.document === document && displayedPage.current.page === page;
+        const scrollLeft = samePage ? element.scrollLeft : 0;
+        const scrollTop = samePage ? element.scrollTop : 0;
         paper.current?.replaceChildren(canvas);
-        viewport.current?.scrollTo(0, 0);
+        displayedPage.current = { document, page };
+        // Only navigation to a different page starts at the top. Zoom and
+        // redraws retain the current position (clamped to the new page bounds).
+        element.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'instant' });
         setEffectiveZoom(scale);
       } catch (cause) {
         if (active && !(cause instanceof Error && cause.name === 'RenderingCancelledException')) {
@@ -125,7 +146,7 @@ export default function PdfViewer({ reportId, onClose, onRefresh }: Props) {
       } finally { if (active) setRendering(false); }
     })();
     return () => { active = false; task?.cancel(); };
-  }, [document, page, zoom, size]);
+  }, [document, page, zoom, fitWidth, fitHeight]);
 
   const unavailable = loading || !document || !!error;
   function changeZoom(delta: number) { setZoom(value => Math.min(3, Math.max(.25, Math.round(((value ?? effectiveZoom) + delta) * 100) / 100))); }
@@ -158,8 +179,10 @@ export default function PdfViewer({ reportId, onClose, onRefresh }: Props) {
         <button type="button" className="pdf-tool pdf-fit" aria-label="페이지 맞춤" title="페이지 맞춤" disabled={unavailable} onClick={() => setZoom(null)}><Maximize2 size={15} /><span>페이지 맞춤</span></button>
       </div>
     </div>
-    <div className="pdf-viewport" ref={viewport} aria-busy={loading || rendering}>
-      <div className="pdf-paper" ref={paper} hidden={!!error || loading} />
+    <div className="pdf-stage" ref={stage}>
+      <div className="pdf-viewport" ref={viewport} aria-busy={loading || rendering}>
+        <div className="pdf-paper" ref={paper} hidden={!!error || loading} />
+      </div>
       {(loading || rendering) && !error && <div className="pdf-loading" role="status"><LoaderCircle size={16} className="spin" />{loading ? '보고서를 불러오는 중…' : '페이지를 표시하는 중…'}</div>}
       {error && <div className="pdf-viewer-error" role="alert"><FileText size={30} /><strong>보고서를 열 수 없습니다</strong><p>{error}</p><div className="pdf-error-actions"><button type="button" onClick={() => setAttempt(value => value + 1)}><RotateCw size={14} />다시 시도</button><button type="button" onClick={onRefresh}>보고서 다시 불러오기</button></div></div>}
     </div>

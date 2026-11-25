@@ -27,6 +27,54 @@ async function waitForRenderedPage(page, number) {
   return page.locator(`canvas[aria-label="PDF ${number}페이지"]`);
 }
 
+async function verifyViewerStability(page, stage, requireScrolled = false) {
+  const measured = await page.evaluate(() => new Promise((resolve, reject) => {
+    const viewport = document.querySelector('.pdf-viewport');
+    const paper = viewport?.querySelector('.pdf-paper');
+    const canvas = paper?.querySelector('canvas');
+    if (!viewport || !paper || !canvas || viewport.getAttribute('aria-busy') !== 'false') {
+      reject(new Error('A fully rendered PDF page is required before sampling stability.')); return;
+    }
+    const startScrollTop = viewport.scrollTop;
+    const widths = new Set([viewport.clientWidth]);
+    let canvasReplacements = 0, busyChanges = 0, samples = 0, maxScrollDrift = 0, frame;
+    const collect = records => {
+      for (const record of records) {
+        if (record.type === 'attributes' && record.target === viewport) busyChanges++;
+        if (record.type === 'childList' && [...record.addedNodes, ...record.removedNodes]
+          .some(node => node instanceof Element && (node.matches('canvas') || node.querySelector('canvas')))) canvasReplacements++;
+      }
+    };
+    const mutations = new MutationObserver(collect);
+    mutations.observe(viewport, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-busy'] });
+    const sample = () => {
+      widths.add(viewport.clientWidth);
+      maxScrollDrift = Math.max(maxScrollDrift, Math.abs(viewport.scrollTop - startScrollTop));
+      samples++;
+      frame = requestAnimationFrame(sample);
+    };
+    sample();
+    setTimeout(() => {
+      collect(mutations.takeRecords()); mutations.disconnect(); cancelAnimationFrame(frame);
+      widths.add(viewport.clientWidth);
+      maxScrollDrift = Math.max(maxScrollDrift, Math.abs(viewport.scrollTop - startScrollTop));
+      resolve({ durationMs: 1000, canvasReplacements, busyChanges, widths: [...widths], samples,
+        sameCanvas: document.querySelector('.pdf-paper canvas') === canvas,
+        busy: viewport.getAttribute('aria-busy'), startScrollTop, endScrollTop: viewport.scrollTop, maxScrollDrift });
+    }, 1000);
+  }));
+  const diagnostic = `${stage}: ${JSON.stringify(measured)}`;
+  assert.ok(measured.samples >= 2, `The PDF viewer must remain rendered while sampling. ${diagnostic}`);
+  assert.equal(measured.canvasReplacements, 0, `An idle PDF page must not be replaced repeatedly. ${diagnostic}`);
+  assert.equal(measured.sameCanvas, true, `The same rendered canvas must remain mounted. ${diagnostic}`);
+  assert.equal(measured.busyChanges, 0, `An idle PDF page must not restart loading. ${diagnostic}`);
+  assert.equal(measured.busy, 'false', diagnostic);
+  assert.equal(measured.widths.length, 1, `The PDF viewport width must not oscillate with scrollbars. ${diagnostic}`);
+  assert.ok(measured.maxScrollDrift <= 1, `An idle PDF page must preserve its scroll position. ${diagnostic}`);
+  if (requireScrolled) assert.ok(measured.startScrollTop > 20 && measured.endScrollTop > 20, `The zoomed page must stay scrolled. ${diagnostic}`);
+  return { stage, ...measured };
+}
+
 async function main() {
   const project = path.resolve(__dirname, '..');
   const source = path.join(project, 'testReport', 'report.pdf');
@@ -109,6 +157,7 @@ async function main() {
     const viewer = page.getByRole('dialog', { name: 'PDF 보고서 뷰어', exact: true });
     await viewer.waitFor({ state: 'visible' });
     await waitForRenderedPage(page, 1);
+    const initialStability = await verifyViewerStability(page, 'initial-page');
     const counter = viewer.locator('.pdf-page-picker > span');
     await counter.waitFor({ state: 'visible' });
     const totalPages = Number((await counter.innerText()).split('/')[1].trim());
@@ -123,6 +172,13 @@ async function main() {
     await page.waitForFunction(width => document.querySelector('canvas[aria-label="PDF 2페이지"]')?.width > width, originalWidth);
     await waitForRenderedPage(page, 2);
     const enlargedWidth = await secondCanvas.evaluate(canvas => canvas.width);
+    const scrolled = await viewer.locator('.pdf-viewport').evaluate(viewport => {
+      const available = viewport.scrollHeight - viewport.clientHeight;
+      viewport.scrollTop = Math.min(240, available);
+      return { available, scrollTop: viewport.scrollTop };
+    });
+    assert.ok(scrolled.available > 20 && scrolled.scrollTop > 20, 'The enlarged real PDF must allow a nonzero scroll-position check.');
+    const zoomedStability = await verifyViewerStability(page, 'zoomed-scrolled-page', true);
     const screenshots = path.join(project, 'screenshots');
     fs.mkdirSync(screenshots, { recursive: true });
     await page.screenshot({ path: path.join(screenshots, 'packaged-report-viewer.png'), animations: 'disabled' });
@@ -156,6 +212,7 @@ async function main() {
     console.log(JSON.stringify({ passed: true, packaged: configuration.packaged, reportBytes: first.size,
       ipcAttachment: true, stableSnapshots: true, sourceUnchanged: true, idOnlyOpen: true,
       ipcPdfBytes: true, oversizedCacheRejected: true, internalViewer: true, renderedPages: [1, 2], totalPages, zoom: true,
+      pdfStability: [initialStability, zoomedStability],
       internalViewerShellOpenCalls: viewerOpenCalls.length, legacyOpenCompatibility,
       externalViewerOpened: false, paidApiCalls: 0 }));
   } catch (error) {

@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 
-async function nativeFixture(page: Page, keyConfigured = true) {
-  await page.addInitScript(({ configured }) => {
+async function nativeFixture(page: Page, keyConfigured = true, pdfSize = { width: 400, height: 560 }) {
+  await page.addInitScript(({ configured, pdfSize }) => {
     const host = window as any;
     const listeners = new Set<(details: any) => void>();
     const pending = new Map<string, { timers: ReturnType<typeof setTimeout>[]; resolve: (result: any) => void }>();
@@ -20,9 +20,9 @@ async function nativeFixture(page: Page, keyConfigured = true) {
     const objects = [
       '<< /Type /Catalog /Pages 2 0 R >>',
       '<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>',
-      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 560] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>',
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pdfSize.width} ${pdfSize.height}] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>`,
       `<< /Length ${firstPage.length} >>\nstream\n${firstPage}\nendstream`,
-      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 560] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>',
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pdfSize.width} ${pdfSize.height}] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>`,
       `<< /Length ${secondPage.length} >>\nstream\n${secondPage}\nendstream`,
       '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
     ];
@@ -106,7 +106,7 @@ async function nativeFixture(page: Page, keyConfigured = true) {
         return { ok: true };
       },
     };
-  }, { configured: keyConfigured });
+  }, { configured: keyConfigured, pdfSize });
 }
 
 async function send(page: Page, content: string) {
@@ -156,6 +156,31 @@ async function pdfCanvasHash(page: Page) {
     let hash = 0;
     for (let index = 0; index < pixels.length; index += 64) hash = (Math.imul(hash, 31) + pixels[index] + pixels[index + 1] + pixels[index + 2] + pixels[index + 3]) | 0;
     return hash;
+  });
+}
+
+async function trackPdfLayout(page: Page) {
+  await page.evaluate(() => {
+    const host = window as any;
+    const ids = new WeakMap<Element, number>();
+    let nextId = 0;
+    host.__pdfLayouts = [];
+    const observer = new MutationObserver(() => {
+      const viewport = document.querySelector<HTMLElement>('.pdf-viewport');
+      if (!viewport) return;
+      const canvas = viewport.querySelector('canvas');
+      if (canvas && !ids.has(canvas)) ids.set(canvas, ++nextId);
+      const paper = viewport.querySelector<HTMLElement>('.pdf-paper');
+      const bounds = canvas?.getBoundingClientRect();
+      host.__pdfLayouts.push({
+        busy: viewport.getAttribute('aria-busy'), canvas: canvas ? ids.get(canvas) : 0,
+        width: viewport.clientWidth, height: viewport.clientHeight,
+        scrollWidth: viewport.scrollWidth, scrollHeight: viewport.scrollHeight,
+        scrollTop: viewport.scrollTop, opacity: paper ? getComputedStyle(paper).opacity : null,
+        paperWidth: bounds?.width ?? 0, paperHeight: bounds?.height ?? 0,
+      });
+    });
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-busy'] });
   });
 }
 
@@ -531,6 +556,65 @@ test('completed report opens an in-app PDF viewer with rendering, pages and zoom
   expect(await page.evaluate(() => (window as any).__native.reportOpens)).toEqual([]);
   expect(await page.evaluate(() => (window as any).__native.requests)).toEqual([]);
   await page.getByRole('button', { name: 'PDF 뷰어 닫기', exact: true }).click();
+  await expect(viewer).toHaveCount(0);
+});
+
+for (const layout of [
+  { name: 'portrait', width: 400, height: 560 },
+  { name: 'landscape', width: 1200, height: 560 },
+]) test(`PDF ${layout.name} layout settles without loading flicker and preserves a scrolled page during zoom`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await nativeFixture(page, true, layout);
+  await page.goto('/');
+  await trackPdfLayout(page);
+  await send(page, 'https://example.com PDF 안정성 확인');
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect(page.getByRole('button', { name: '응답 중지', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: '보고서 열기', exact: true }).click();
+  const viewer = page.getByRole('dialog', { name: 'PDF 보고서 뷰어', exact: true });
+  const canvas = await renderedPdfCanvas(page);
+  const viewport = viewer.locator('.pdf-viewport');
+  // Observe an idle frame window: no user action may trigger fresh canvas
+  // replacement, busy cycling, scrollbar-width oscillation or paper dimming.
+  await page.evaluate(() => { (window as any).__pdfLayouts = []; });
+  await page.evaluate(async () => { for (let frame = 0; frame < 60; frame++) await new Promise(requestAnimationFrame); });
+  const idle = await page.evaluate(() => (window as any).__pdfLayouts as { busy: string; canvas: number; width: number; opacity: string; scrollHeight: number; height: number }[]);
+  await testInfo.attach(`pdf-${layout.name}-idle-layout`, { body: JSON.stringify(idle, null, 2), contentType: 'application/json' });
+  expect.soft(new Set(idle.filter(sample => sample.canvas).map(sample => sample.canvas)).size, 'Idle PDF must not continuously replace its canvas.').toBeLessThanOrEqual(1);
+  expect.soft(new Set(idle.map(sample => sample.width)).size, 'Loading status must not toggle the viewport scrollbar width.').toBeLessThanOrEqual(1);
+  expect.soft(idle.filter(sample => sample.canvas && sample.opacity !== '1').length, 'A rendered page must stay fully visible while its replacement is prepared.').toBe(0);
+  await expect(viewport).toHaveAttribute('aria-busy', 'false');
+  // Grow the page beyond the viewport, then retain the reader's position as
+  // both zoom and viewport size change. Page navigation still starts at top.
+  for (let step = 0; step < 4; step++) {
+    const width = await canvas.evaluate((element: HTMLCanvasElement) => element.width);
+    await viewer.getByRole('button', { name: '확대', exact: true }).click();
+    await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => element.width)).toBeGreaterThan(width);
+    await expect(viewport).toHaveAttribute('aria-busy', 'false');
+  }
+  await viewport.evaluate(element => { element.scrollTop = 130; });
+  expect(await viewport.evaluate(element => element.scrollTop)).toBe(130);
+  const width = await canvas.evaluate((element: HTMLCanvasElement) => element.width);
+  await viewer.getByRole('button', { name: '확대', exact: true }).click();
+  await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => element.width)).toBeGreaterThan(width);
+  await expect(viewport).toHaveAttribute('aria-busy', 'false');
+  expect.soft(await viewport.evaluate(element => element.scrollTop), 'Zoom must not return a scrolled document to its top.').toBeGreaterThan(100);
+  await viewport.evaluate(element => { element.scrollTop = 130; });
+  await page.setViewportSize({ width: 980, height: 650 });
+  await page.evaluate(async () => { for (let frame = 0; frame < 12; frame++) await new Promise(requestAnimationFrame); });
+  await expect(viewport).toHaveAttribute('aria-busy', 'false');
+  expect.soft(await viewport.evaluate(element => element.scrollTop), 'Resizing must not return a scrolled document to its top.').toBeGreaterThan(100);
+  await viewer.getByRole('button', { name: '다음 페이지', exact: true }).click();
+  await expect(viewer.getByText('2 / 2', { exact: true })).toBeVisible();
+  await expect(canvas).toHaveAttribute('aria-label', 'PDF 2페이지');
+  await expect(viewport).toHaveAttribute('aria-busy', 'false');
+  expect(await viewport.evaluate(element => element.scrollTop)).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBe(0);
+  const finalLayouts = await page.evaluate(() => (window as any).__pdfLayouts as { busy: string; canvas: number; opacity: string }[]);
+  expect.soft(finalLayouts.filter(sample => sample.busy === 'true' && sample.canvas && sample.opacity !== '1').length, 'Zoom and page transitions must retain the previous page without flashing it dim.').toBe(0);
+  await testInfo.attach(`pdf-${layout.name}-final-layout`, { body: JSON.stringify(finalLayouts, null, 2), contentType: 'application/json' });
+  await page.screenshot({ path: `screenshots/reference-pdf-stable-${layout.name}.png`, animations: 'disabled' });
+  await page.keyboard.press('Escape');
   await expect(viewer).toHaveCount(0);
 });
 

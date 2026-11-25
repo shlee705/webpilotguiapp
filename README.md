@@ -1,8 +1,8 @@
-# WebPilot Desktop 0.4.2
+# WebPilot Desktop 0.4.3
 
-이 저장소는 성능 개선 버전 **0.4.2** 프로젝트입니다. 전체 소스, 개발 설정, 테스트, 앱 아이콘, 원본 `testReport/report.pdf`와 `release/0.4.2/win-unpacked` 실행 폴더 전체를 포함합니다. 이전 `release/0.4.1`도 보존되어 있습니다. 실행파일과 런타임은 Git LFS로 관리합니다. 실행파일과 빌드 결과를 포함한 전체 프로젝트 ZIP은 [v0.4.2 릴리스](https://github.com/shlee705/webpilotguiapp/releases/tag/v0.4.2)에서도 받을 수 있습니다. 실행기록과 재설치 가능한 개발 의존성(프로젝트 루트의 `node_modules`)은 제외했습니다.
+이 저장소는 PDF 뷰어 안정성을 개선한 **0.4.3** 프로젝트입니다. 전체 소스, 개발 설정, 테스트, 앱 아이콘, 원본 `testReport/report.pdf`와 `release/0.4.3/win-unpacked` 실행 폴더 전체를 포함합니다. 이전 `release/0.4.1`과 `release/0.4.2`도 보존되어 있습니다. 실행파일과 런타임은 Git LFS로 관리합니다. 전체 프로젝트 ZIP은 [v0.4.3 릴리스](https://github.com/shlee705/webpilotguiapp/releases/tag/v0.4.3)에서도 받을 수 있습니다. 실행기록, 개인 설정과 재설치 가능한 개발 의존성(프로젝트 루트의 `node_modules`)은 제외했습니다.
 
-Git으로 받을 때는 Git LFS가 설치된 환경에서 저장소를 복제한 뒤 `git lfs pull`을 실행하세요. GitHub의 일반 **Download ZIP** 대신 위 릴리스의 `WebPilot-0.4.2-full-project.zip`을 받으면 실행에 필요한 실제 파일 전체가 포함됩니다.
+Git으로 받을 때는 Git LFS가 설치된 환경에서 저장소를 복제한 뒤 `git lfs pull`을 실행하세요. GitHub의 일반 **Download ZIP** 대신 위 릴리스의 `WebPilot-0.4.3-full-project.zip`을 받으면 실행에 필요한 실제 파일 전체가 포함됩니다.
 
 소스만 받은 경우 `npm ci` 후 `npm run desktop`으로 실행하거나 `npm run package`로 Windows 실행파일을 만들 수 있습니다.
 
@@ -10,7 +10,7 @@ Git으로 받을 때는 Git LFS가 설치된 환경에서 저장소를 복제한
 
 ## 시작
 
-1. `release/0.4.2/win-unpacked/WebPilot.exe`를 실행합니다.
+1. `release/0.4.3/win-unpacked/WebPilot.exe`를 실행합니다.
 2. 왼쪽 아래 **QA팀** 계정을 눌러 OpenAI API 키와 모델을 저장합니다. 기본 모델은 GPT-6 Luna입니다.
 3. URL과 원하는 버그 탐색 내용을 보냅니다.
 4. 대화에 표시된 **테스트 설정** 카드에서 URL·모델·동작 한도를 확인합니다. **설정 바꾸기**에서 수정할 수 있습니다.
@@ -84,6 +84,6 @@ node scripts/smoke-tour-desktop.cjs
 npm run package
 ```
 
-브라우저 UI 테스트는 전용 5197 포트를 사용합니다. 실제 Edge 검증은 로컬 사이트와 임시 프로필을 사용하며, 모델 응답은 모의 응답으로 확인합니다. 유료 API 호출은 사용자가 키를 설정하고 작업을 시작한 뒤 수행됩니다. 배포에는 `release/0.4.2/win-unpacked` 폴더 전체가 필요합니다.
+브라우저 UI 테스트는 전용 5197 포트를 사용합니다. 실제 Edge 검증은 로컬 사이트와 임시 프로필을 사용하며, 모델 응답은 모의 응답으로 확인합니다. 유료 API 호출은 사용자가 키를 설정하고 작업을 시작한 뒤 수행됩니다. 배포에는 `release/0.4.3/win-unpacked` 폴더 전체가 필요합니다.
 
 모델 목록: [OpenAI 공식 모델 문서](https://developers.openai.com/api/docs/models). 기존 모델 선택과 직접 ID 입력을 지원합니다.

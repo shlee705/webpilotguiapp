@@ -1,7 +1,7 @@
 {
   "name": "webpilot-desktop",
   "private": true,
-  "version": "0.4.2",
+  "version": "0.4.3",
   "webpilotWorkspace": "webpilot-report-root-v1",
   "description": "WebPilot — 웹 테스트 에이전트를 위한 데스크톱 워크스페이스",
   "type": "module",
@@ -38,7 +38,7 @@
     "appId": "studio.webpilot.desktop",
     "productName": "WebPilot",
     "directories": {
-      "output": "release/0.4.2"
+      "output": "release/0.4.3"
     },
     "files": [
       "dist/**/*",
