@@ -1,0 +1,92 @@
+/* Scoped overrides keep the report and agent states independent of plan styling. */
+.agent-activity.pilot-activity {
+  width: 100%;
+  min-width: 0;
+  margin: 18px 0 14px;
+  border: 1px solid #e7e7eb;
+  border-radius: 12px;
+  background: #fafafa;
+  color: #56565f;
+  overflow: hidden;
+}
+.pilot-activity.agent-activity-active { padding: 0; background: #fafafa; }
+.pilot-activity.agent-activity-active::before { display: none; }
+.pilot-activity .agent-activity-main { gap: 12px; min-height: 0; padding: 18px 18px 12px; align-items: center; }
+.pilot-activity .agent-activity-symbol {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  width: 31px;
+  height: 31px;
+  padding: 8px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  background: #28282d;
+}
+.pilot-activity .agent-activity-symbol i { width: 3px; background: #fff; border-radius: .5px; }
+.pilot-activity .agent-activity-symbol i:nth-child(1) { height: 7px; opacity: .65; }
+.pilot-activity .agent-activity-symbol i:nth-child(2) { height: 11px; opacity: .85; }
+.pilot-activity .agent-activity-symbol i:nth-child(3) { height: 15px; }
+.pilot-activity .agent-activity-copy { flex: 1; min-width: 0; }
+.pilot-activity .agent-activity-copy h3 { color: #34343c; font-size: 12px; font-weight: 500; line-height: 1.75; letter-spacing: -.1px; margin: 0; }
+.pilot-activity .agent-activity-copy p { margin: 4px 0 0; color: #7a7a84; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.pilot-activity .agent-activity-thinking-dots { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 0 1px 0 5px; }
+.pilot-activity .agent-activity-thinking-dots i { width: 4px; height: 4px; border-radius: 50%; background: #8a8a93; animation: pilot-thinking-dot 1.4s ease-in-out infinite; }
+.pilot-activity .agent-activity-thinking-dots i:nth-child(2) { animation-delay: .16s; }
+.pilot-activity .agent-activity-thinking-dots i:nth-child(3) { animation-delay: .32s; }
+.pilot-activity .agent-activity-location { gap: 6px; min-width: 0; margin: 0 18px 15px 61px; padding: 0; border: 0; border-radius: 0; background: none; color: #91919a; font-size: 10px; line-height: 1.5; }
+.pilot-activity .agent-activity-location > svg { color: #a1a1aa; }
+.pilot-activity .agent-activity-bottom { justify-content: flex-start; gap: 14px; margin: 0; padding: 10px 18px; border-top: 1px solid #ececf0; background: #f6f6f8; flex-wrap: wrap; }
+.pilot-activity .agent-activity-stage-current { color: #65656f; font-size: 10px; line-height: 1.6; }
+.pilot-activity .agent-activity-count { color: #94949d; font-size: 10px; line-height: 1.6; font-weight: 400; }
+.pilot-activity .agent-activity-count strong { color: #777780; font-weight: 500; margin-left: 1px; }
+.pilot-activity .agent-activity-count > span { padding: 0 3px; color: #b5b5bc; }
+.pilot-activity .agent-activity-elapsed { gap: 5px; margin-left: auto; color: #94949e; font-size: 10px; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+.pilot-activity .agent-activity-summary { gap: 11px; padding: 15px 18px; }
+.pilot-activity .agent-activity-summary > div { min-width: 0; }
+.pilot-activity .agent-activity-end-icon { width: 28px; height: 28px; border: 1px solid #e3e3e8; border-radius: 8px; background: #f0f0f3; color: #6e6e78; }
+.pilot-activity .agent-activity-summary h3 { margin: 0; color: #5d5d67; font-size: 11px; line-height: 1.7; font-weight: 500; }
+.pilot-activity .agent-activity-summary p { color: #9696a0; font-size: 10px; line-height: 1.7; margin: 3px 0 0; }
+.pilot-activity .agent-activity-summary p > span { color: #c3c3ca; }
+.pilot-activity .agent-activity-done-label { border-color: #e3e3e8; border-radius: 5px; color: #85858f; background: #fff; font-size: 9px; white-space: nowrap; }
+.pilot-activity.agent-activity-error .agent-activity-end-icon { color: #a06363; background: #faf3f3; border-color: #ecdede; }
+.pilot-activity.agent-activity-error .agent-activity-summary h3 { color: #946565; }
+.pilot-activity.agent-activity-cancelled .agent-activity-end-icon { color: #8b8b94; }
+
+.report-card.pilot-report { margin: 16px 0; border: 1px solid #e5e5ea; border-radius: 12px; background: #fff; color: #565660; }
+.pilot-report .report-card-main { gap: 14px; padding: 17px 18px; align-items: center; }
+.pilot-report .report-file-icon { width: 41px; height: 49px; border: 1px solid #e7e7eb; border-radius: 7px; background: #f6f6f8; color: #878790; padding-bottom: 10px; }
+.pilot-report .report-file-icon b { color: #8b8b95; font-size: 7px; font-weight: 600; bottom: 5px; letter-spacing: .6px; }
+.pilot-report .report-file-info { gap: 3px; }
+.pilot-report .report-file-info strong { color: #414149; font-size: 12px; font-weight: 500; }
+.pilot-report .report-file-info span { color: #9898a1; font-size: 10px; line-height: 1.6; }
+.pilot-report .report-file-info small { color: #81818c; font-size: 10px; line-height: 1.6; }
+.pilot-report .report-open { gap: 5px; padding: 8px 10px; border: 1px solid #e3e3e8; border-radius: 7px; background: #fff; color: #686872; font-size: 10px; line-height: 1.6; transition: background .16s, border-color .16s, color .16s; }
+.pilot-report .report-open:hover:not(:disabled) { color: #34343c; background: #f7f7f9; border-color: #ceced6; }
+.pilot-report button:focus-visible { outline: 2px solid #686872; outline-offset: 3px; }
+.pilot-report button:disabled { opacity: .5; cursor: default; }
+.pilot-report .report-error { padding: 11px 18px; border-color: #ece4e4; background: #fcf8f8; color: #a07171; font-size: 10px; line-height: 1.8; }
+.pilot-report .report-error > svg { flex-shrink: 0; }
+.pilot-report .report-error > span { min-width: 0; overflow-wrap: anywhere; }
+.pilot-report .report-error button { color: #8c6262; text-underline-offset: 3px; }
+
+@keyframes pilot-thinking-dot { 0%, 70%, 100% { opacity: .35; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-3px); } }
+@media (max-width: 760px) {
+  .pilot-activity .agent-activity-main { padding: 15px 14px 11px; gap: 10px; }
+  .pilot-activity .agent-activity-location { margin-left: 55px; margin-right: 14px; }
+  .pilot-activity .agent-activity-bottom { padding: 10px 14px; gap: 10px; }
+  .pilot-activity .agent-activity-summary, .pilot-report .report-card-main { padding: 14px; }
+}
+@media (max-width: 580px) {
+  .pilot-activity .agent-activity-main { align-items: flex-start; }
+  .pilot-activity .agent-activity-thinking-dots { align-self: center; gap: 3px; }
+  .pilot-activity .agent-activity-copy h3 { font-size: 11px; }
+  .pilot-activity .agent-activity-copy p { font-size: 10px; }
+  .pilot-activity .agent-activity-bottom { gap: 8px 12px; }
+  .pilot-report .report-card-main { gap: 12px; flex-wrap: wrap; }
+  .pilot-report .report-open { margin-left: 53px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pilot-activity *, .pilot-activity::before, .pilot-report * { animation: none !important; transition: none !important; }
+}

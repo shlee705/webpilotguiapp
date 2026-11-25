@@ -1,0 +1,176 @@
+.tour-plan { width: 100%; min-width: 0; margin: 19px 0 10px; border: 1px solid #e2e7da; border-radius: 13px; overflow: hidden; background: #fff; color: #6c775e; }
+.tour-plan-heading { display: flex; align-items: center; gap: 10px; padding: 18px 19px 17px; }
+.tour-plan-symbol { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex-shrink: 0; border: 1px solid #e7e9dc; border-radius: 10px; background: #f6f7ef; color: #9a9f79; }
+.tour-plan-heading h3 { margin: 0; font-size: 13px; font-weight: 600; color: #616e52; letter-spacing: -.2px; }
+.tour-plan-heading p { margin: 5px 0 0; font-size: 10px; color: #a1aa94; line-height: 1.6; }
+.tour-plan-state { display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: auto; padding: 4px 6px; border: 1px solid #e7ebdf; border-radius: 5px; color: #9ca98b; background: #fafbf7; font-size: 9px; white-space: nowrap; }
+.tour-plan-table { width: 100%; border-collapse: collapse; table-layout: fixed; text-align: left; }
+.tour-plan-label-column { width: 27%; }
+.tour-plan-table thead { background: #f5f7f0; }
+.tour-plan-table thead th { padding: 10px 19px; border-top: 1px solid #e9eddf; border-bottom: 1px solid #e4e9da; font-size: 10px; font-weight: 500; color: #919d7e; }
+.tour-plan-table tbody th, .tour-plan-table tbody td { border-bottom: 1px solid #eff1e9; padding: 10px 19px; vertical-align: top; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; word-break: normal; }
+.tour-plan-table tbody th { font-weight: 400; color: #9aa58b; }
+.tour-plan-table tbody td { color: #758365; }
+.tour-plan-url { font-size: 11px; color: #8e9779; overflow-wrap: anywhere; }
+.tour-plan-value-note { color: #adb69c; }
+.tour-plan-table .tour-plan-time { font-size: 10px; color: #a0ab90; }
+.tour-plan-model { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; }
+.tour-plan-model > span { display: block; width: 4px; height: 4px; flex-shrink: 0; border-radius: 50%; background: #a6b58b; }
+.tour-plan-request { padding: 0 19px; }
+.tour-plan-request summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 38px; cursor: pointer; list-style: none; color: #a3ad94; font-size: 10px; }
+.tour-plan-request summary::-webkit-details-marker { display: none; }
+.tour-plan-request summary > svg { transition: transform .16s; }
+.tour-plan-request[open] summary > svg { transform: rotate(90deg); }
+.tour-plan-request summary:focus-visible { outline: 2px solid #dc7856; outline-offset: -2px; border-radius: 4px; }
+.tour-plan-request p { font-size: 11px; color: #8a9979; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 125px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #d7dfca transparent; margin: 0 0 15px; }
+.tour-plan-confirm { padding: 15px 19px 18px; border-top: 1px solid #eaeee1; background: #fcfdf9; }
+.tour-plan-confirm > p { font-size: 11px; line-height: 1.7; margin: 0 0 12px; color: #879773; }
+.tour-plan-actions { display: flex; align-items: center; gap: 8px; }
+.tour-plan-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 13px; border: 1px solid transparent; border-radius: 7px; font-size: 11px; font-weight: 500; }
+.tour-plan-start { color: #fff; background: #d97c5b; box-shadow: 0 2px 4px #c98c5b13; }
+.tour-plan-start:hover { background: #c76d4d; }
+.tour-plan-actions .tour-plan-edit { color: #96a285; border-color: #e1e7d7; background: #fff; }
+.tour-plan-edit:hover { background: #f2f6eb; }
+.tour-plan-actions button:disabled { opacity: .45; cursor: default; }
+.tour-plan-result { display: flex; align-items: flex-start; gap: 6px; border-top: 1px solid #edf0e6; padding: 12px 19px; color: #9daa8b; font-size: 10px; line-height: 1.7; }
+.tour-plan-result > svg { flex-shrink: 0; margin-top: 2px; }
+.tour-plan-error .tour-plan-state, .tour-plan-error .tour-plan-result { color: #be9377; }
+.tour-plan-running .tour-plan-state > svg, .tour-plan-running .tour-plan-result > svg { animation: tour-status-spin 1.2s linear infinite; }
+
+.tour-editor { min-width: 0; }
+.tour-input-hint { color: #9da88e; font-size: 10px; line-height: 1.6; margin: 6px 0 0; }
+.report-card { border: 1px solid #e2e7da; border-radius: 12px; background: #fcfdf9; margin: 16px 0; overflow: hidden; }
+.report-card-main { display: flex; align-items: center; gap: 14px; padding: 18px; }
+.report-file-icon { position: relative; flex-shrink: 0; width: 44px; height: 52px; border-radius: 8px; background: #f4e9e0; color: #c28264; display: flex; align-items: center; justify-content: center; padding-bottom: 10px; }
+.report-file-icon b { position: absolute; bottom: 6px; font-size: 8px; letter-spacing: 1px; }
+.report-file-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.report-file-info strong { font-size: 13px; font-weight: 600; color: #6d795e; }
+.report-file-info span, .report-file-info small { font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; color: #9ca98b; }
+.report-open { display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid #dce4d0; border-radius: 7px; padding: 9px 11px; color: #7e906a; background: #fff; font-size: 11px; white-space: nowrap; }
+.report-open:hover { background: #f0f5e8; }
+.report-card button:disabled { opacity: .5; cursor: default; }
+.report-error { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding: 11px 18px; border-top: 1px solid #eee4d8; background: #fcf7ef; font-size: 10px; line-height: 1.7; color: #b18d6c; }
+.report-error button { margin-left: auto; border: 0; padding: 0; background: transparent; color: inherit; text-decoration: underline; }
+@media (max-width: 580px) { .report-card-main { flex-wrap: wrap; } .report-open { margin-left: 58px; } }
+.tour-editor label { display: block; margin: 17px 0 8px; color: #8b997a; font-size: 11px; line-height: 1.6; }
+.tour-editor > label:first-child, .tour-editor-grid label { margin-top: 0; }
+.tour-editor input, .tour-editor textarea, .tour-editor select { display: block; width: 100%; min-width: 0; border: 1px solid #dfe6d5; border-radius: 8px; padding: 10px 11px; background: #fff; color: #738262; font: inherit; font-size: 12px; line-height: 1.7; transition: border-color .16s, box-shadow .16s; }
+.tour-editor input::placeholder, .tour-editor textarea::placeholder { color: #b0bba1; }
+.tour-editor input:focus, .tour-editor textarea:focus, .tour-editor select:focus { outline: none; border-color: #a3b48e; box-shadow: 0 0 0 3px #a3b48e10; }
+.tour-editor textarea { min-height: 105px; max-height: 220px; resize: vertical; scrollbar-width: thin; scrollbar-color: #d7dfca transparent; }
+.tour-editor select { min-height: 43px; appearance: auto; padding-right: 6px; }
+.tour-editor-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 12px; margin-top: 17px; }
+.tour-editor-grid > div { min-width: 0; }
+.tour-editor-note { margin: 18px 0 0; padding: 12px 13px; border: 1px solid #e8eddf; border-radius: 8px; background: #f8faf3; color: #a0ae8c; font-size: 10px; line-height: 1.9; }
+.tour-editor .dialog-actions { margin-top: 21px; }
+
+.agent-activity { position: relative; width: 100%; min-width: 0; border: 1px solid #e6eadc; border-radius: 12px; overflow: hidden; margin: 20px 0 12px; color: #83936e; background: #fafbf7; }
+.agent-activity-active { padding: 15px 17px 0; background: linear-gradient(135deg, #fcfdf9, #f8faf3); }
+.agent-activity-active::before { content: ''; position: absolute; height: 1px; width: 55%; top: 0; left: -60%; background: linear-gradient(90deg, transparent, #ccb995, #a7b78e, transparent); animation: tour-edge-travel 4.5s ease-in-out infinite; }
+.agent-activity-topline { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.agent-activity-live { display: inline-flex; align-items: center; gap: 6px; font-size: 7px; letter-spacing: 1.6px; color: #a7b194; font-weight: 500; }
+.agent-activity-live > i { width: 4px; height: 4px; border-radius: 50%; background: #a9b993; box-shadow: 0 0 0 3px #aabf8a13; animation: tour-live-pulse 2s ease-in-out infinite; }
+.agent-activity-elapsed { display: inline-flex; align-items: center; gap: 4px; color: #b0baa0; font-size: 9px; font-variant-numeric: tabular-nums; letter-spacing: .5px; }
+.agent-activity-main { display: flex; align-items: center; gap: 13px; min-height: 74px; padding: 15px 0 10px; }
+.agent-activity-orbit { position: relative; display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; flex-shrink: 0; }
+.agent-activity-orbit-track { position: absolute; inset: 0; border: 1px solid #e4e9d9; border-radius: 50%; }
+.agent-activity-orbit-core { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; border: 1px solid #e2e8d6; border-radius: 12px; background: #f0f4e8; color: #a0af86; box-shadow: 0 1px 6px #71884804; }
+.agent-activity-orbit-satellite { position: absolute; inset: -2px; border: 1px solid transparent; border-top-color: #cbb597; border-radius: 50%; animation: tour-orbit 5s linear infinite; }
+.agent-activity-orbit-satellite::after { content: ''; position: absolute; top: 5px; right: 5px; width: 4px; height: 4px; border: 1px solid #fcfdf9; border-radius: 50%; background: #c0a580; box-shadow: 0 0 0 2px #cfba9510; }
+.agent-activity-orbit-small { position: absolute; width: 3px; height: 3px; bottom: 4px; left: 4px; border-radius: 50%; background: #bdc9aa; }
+.agent-activity-copy { flex: 1; min-width: 0; }
+.agent-activity-copy h3 { margin: 0; font-size: 12px; line-height: 1.8; font-weight: 500; letter-spacing: -.2px; color: #7e8e68; overflow-wrap: anywhere; }
+.agent-activity-copy p { margin: 4px 0 0; font-size: 10px; color: #a2af90; line-height: 1.7; }
+.agent-activity-stack { position: relative; width: 48px; height: 43px; flex-shrink: 0; margin-left: 3px; }
+.agent-activity-stack > span { position: absolute; display: block; width: 32px; height: 36px; border: 1px solid #dfe6d2; border-radius: 5px; background: #fafbf6; box-shadow: 0 2px 5px #738b4805; }
+.agent-activity-stack > span:first-child { left: 0; top: 1px; transform: rotate(-12deg); opacity: .55; }
+.agent-activity-stack > span:nth-child(2) { left: 7px; top: 4px; transform: rotate(-4deg); opacity: .8; }
+.agent-activity-stack > span:last-child { left: 14px; top: 6px; color: #aabb91; padding: 5px; transform: rotate(7deg); animation: tour-card-arrive .5s ease-out; }
+.agent-activity-stack > span > i { display: block; height: 2px; width: 15px; background: #dce6ce; border-radius: 1px; margin-top: 3px; }
+.agent-activity-stack > span > i:last-child { width: 9px; margin-top: 2px; background: #e8eedf; }
+.agent-activity-location { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border: 1px solid #e9eddf; border-radius: 6px; background: #ffffff9e; color: #a8b396; font-size: 9px; min-width: 0; margin-bottom: 14px; }
+.agent-activity-location > svg { flex-shrink: 0; color: #b2bea0; }
+.agent-activity-location > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.agent-activity-location > svg:last-child { margin-left: auto; }
+.agent-activity-bottom { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 -17px; padding: 11px 17px; border-top: 1px solid #e9eddf; background: #f7f9f2; }
+.agent-activity-stages { display: flex; align-items: center; min-width: 0; }
+.agent-activity-stages > div { display: flex; align-items: center; gap: 5px; font-size: 8px; color: #b1bca1; white-space: nowrap; }
+.agent-activity-stages > div > span:first-child { line-height: 0; }
+.agent-activity-stages > div > i { width: 18px; height: 1px; background: #e1e8d4; margin: 0 8px 0 4px; position: relative; overflow: hidden; }
+.agent-activity-stages .agent-activity-stage-current { color: #94a578; }
+.agent-activity-stage-current > i::after { content: ''; position: absolute; top: 0; left: -8px; width: 8px; height: 1px; background: #b6c69e; animation: tour-path-travel 2.5s ease-in-out infinite; }
+.agent-activity-count { color: #a3b190; font-size: 9px; white-space: nowrap; flex-shrink: 0; }
+.agent-activity-count strong { color: #8c9e74; font-weight: 500; font-variant-numeric: tabular-nums; margin-left: 2px; }
+.agent-activity-finalizing .agent-activity-orbit-core { background: #f7f1e8; border-color: #ebe1cf; color: #bba47e; }
+.agent-activity-finalizing .agent-activity-copy h3 { color: #9b8e71; }
+.agent-activity-finalizing .agent-activity-stack { animation: tour-stack-settle 3s ease-in-out infinite; }
+.agent-activity-summary { display: flex; align-items: center; gap: 10px; padding: 14px 16px; }
+.agent-activity-end-icon { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex-shrink: 0; border: 1px solid #e3e9d8; border-radius: 9px; background: #f0f4e8; color: #9bb180; }
+.agent-activity-summary h3 { font-size: 11px; line-height: 1.7; font-weight: 500; margin: 0; color: #8a9a74; }
+.agent-activity-summary p { font-size: 9px; line-height: 1.6; margin: 4px 0 0; color: #a8b399; }
+.agent-activity-summary p > span { margin: 0 5px; color: #c2cbb6; }
+.agent-activity-done-label { margin-left: auto; padding: 3px 6px; border: 1px solid #e1e8d5; border-radius: 4px; font-size: 8px; color: #a1b18b; }
+.agent-activity-error .agent-activity-end-icon { color: #c29b7c; background: #fbf5ec; border-color: #eee2d1; }
+.agent-activity-error .agent-activity-summary h3 { color: #ad9477; }
+.agent-activity-cancelled .agent-activity-end-icon { color: #adb69e; }
+@keyframes tour-status-spin { to { transform: rotate(360deg); } }
+@keyframes tour-orbit { to { transform: rotate(360deg); } }
+@keyframes tour-live-pulse { 50% { opacity: .45; } }
+@keyframes tour-edge-travel { 60%, 100% { left: 110%; } }
+@keyframes tour-path-travel { 75%, 100% { left: 25px; } }
+@keyframes tour-card-arrive { from { opacity: .4; transform: translateY(-4px) rotate(2deg); } to { opacity: 1; transform: rotate(7deg); } }
+@keyframes tour-stack-settle { 50% { transform: translateY(-2px); } }
+@media (max-width: 760px) {
+  .tour-plan-heading { padding: 15px; gap: 8px; }
+  .tour-plan-table thead th, .tour-plan-table tbody th, .tour-plan-table tbody td { padding: 9px 14px; }
+  .tour-plan-label-column { width: 28%; }
+  .tour-plan-request { padding: 0 14px; }
+  .tour-plan-confirm { padding: 14px; }
+  .agent-activity-main { gap: 10px; }
+  .agent-activity-copy h3 { font-size: 11px; }
+  .agent-activity-copy p { font-size: 9px; }
+  .agent-activity-stack { width: 40px; transform: scale(.9); transform-origin: right center; }
+  .agent-activity-stages > div > i { width: 12px; margin-right: 5px; }
+}
+@media (max-width: 550px) {
+  .tour-editor-grid { gap: 9px; }
+  .tour-editor input, .tour-editor textarea, .tour-editor select { font-size: 11px; }
+  .tour-plan-heading h3 { font-size: 12px; }
+  .tour-plan-heading p { font-size: 9px; }
+  .tour-plan-symbol { width: 27px; height: 27px; }
+  .tour-plan-label-column { width: 30%; }
+  .tour-plan-table tbody th, .tour-plan-table tbody td { font-size: 10px; }
+  .tour-plan-table thead th, .tour-plan-table tbody th, .tour-plan-table tbody td { padding: 9px 11px; }
+  .tour-plan-url { font-size: 10px; }
+  .agent-activity-active { padding: 13px 13px 0; }
+  .agent-activity-main { gap: 10px; }
+  .agent-activity-orbit { width: 40px; height: 40px; }
+  .agent-activity-orbit-core { width: 29px; height: 29px; border-radius: 10px; }
+  .agent-activity-stack { display: none; }
+  .agent-activity-bottom { margin: 0 -13px; padding: 10px 13px; gap: 6px; }
+  .agent-activity-stages > div { font-size: 7px; gap: 3px; }
+  .agent-activity-stages > div > i { width: 9px; margin: 0 5px 0 2px; }
+  .agent-activity-count { font-size: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tour-plan *, .agent-activity *, .agent-activity::before, .agent-activity *::before, .agent-activity *::after { animation: none !important; transition: none !important; }
+  .agent-activity-active::before { display: none; }
+}
+
+.tour-browser-motion { position:relative; width:55px; height:42px; flex-shrink:0; border:1px solid #dce4d0; border-radius:7px; background:#fff; color:#b48a6b; }
+.tour-browser-motion > span { display:block; height:8px; border-bottom:1px solid #e6ebdc; background:#f0f4e9; border-radius:7px 7px 0 0; }
+.tour-browser-motion > i { display:block; width:29px; height:3px; margin:7px 0 0 7px; border-radius:2px; background:#e3ebd8; }
+.tour-browser-motion > i + i { width:18px; margin-top:5px; }
+.tour-browser-motion > svg { position:absolute; right:3px; bottom:-3px; filter:drop-shadow(0 2px 2px #89745415); animation:tour-pointer-drift 3s ease-in-out infinite; }
+.agent-activity-thinking .tour-browser-motion > svg { animation-play-state:paused; }
+@keyframes tour-pointer-drift { 50% { transform:translate(-13px,-10px); } }
+.tour-login-fields { border-top:1px solid #e7ecde; margin-top:20px; padding-top:16px; }
+.tour-editor .tour-login-toggle { display:flex; align-items:center; gap:8px; margin:0; color:#78876a; }
+.tour-editor .tour-login-toggle input { width:15px; height:15px; padding:0; accent-color:#879b6e; box-shadow:none; }
+.tour-login-note { font-size:10px; color:#a1ad91; line-height:1.8; margin:10px 0 0; }
+.composer-error { font-size:11px; color:#b57f61; margin:10px 5px 0; line-height:1.7; }
+.tour-log { font-size:10px; color:#9ca88c; margin:12px 0 15px; }
+.tour-log summary { cursor:pointer; padding:8px 0; }
+.tour-log .agent-steps { margin:4px 0 0; font-size:10px; }
+@media (max-width:550px) { .tour-browser-motion { display:none; } .agent-activity-stages > div { font-size:7px; } }
+@media (prefers-reduced-motion:reduce) { .tour-browser-motion > svg { animation:none; } }

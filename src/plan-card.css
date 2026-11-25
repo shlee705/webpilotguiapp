@@ -1,0 +1,154 @@
+.tour-plan.reference-plan {
+  width: 100%;
+  min-width: 0;
+  margin: 12px 0 8px;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #29292e;
+}
+
+.reference-plan-frame {
+  overflow: hidden;
+  border: 1px solid #e3e3e8;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.reference-plan-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 37px;
+  padding: 8px 14px;
+  background: #f3f3f6;
+}
+
+.reference-plan-header h3 {
+  margin: 0;
+  color: #29292e;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.reference-plan .tour-plan-state {
+  gap: 4px;
+  margin: 0;
+  padding: 2px 7px;
+  border: 1px solid #e4e4e9;
+  border-radius: 999px;
+  background: #fff;
+  color: #85858f;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 400;
+}
+
+.reference-plan .tour-plan-label-column { width: 100px; }
+
+.reference-plan .tour-plan-table tbody th,
+.reference-plan .tour-plan-table tbody td {
+  height: 31px;
+  padding: 6px 14px;
+  border-bottom: 1px solid #f0f0f3;
+  font-size: 12px;
+  line-height: 18px;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  font-weight: 400;
+}
+
+.reference-plan .tour-plan-table tbody th { color: #75757f; }
+.reference-plan .tour-plan-table tbody td { color: #4b4b55; }
+.reference-plan .tour-plan-table tbody tr:last-child > * { border-bottom: 0; }
+.reference-plan .tour-plan-url { color: #4b4b55; font-size: inherit; }
+.reference-plan .tour-plan-value-note { color: #85858f; }
+.reference-plan .tour-plan-model { display: inline; font-size: inherit; }
+.reference-plan .tour-plan-table .tour-plan-time { color: #75757f; font-size: inherit; }
+
+.reference-plan .tour-plan-confirm {
+  padding: 11px 0 0;
+  border: 0;
+  background: transparent;
+}
+
+.reference-plan .tour-plan-confirm > p {
+  margin: 0 0 9px;
+  color: #393941;
+  font-size: 12px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+.reference-plan .tour-plan-actions { gap: 7px; flex-wrap: wrap; }
+.reference-plan .tour-plan-actions button {
+  min-height: 29px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 17px;
+  font-weight: 400;
+  box-shadow: none;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+.reference-plan .tour-plan-start { background: #29292e; color: #fff; }
+.reference-plan .tour-plan-start:hover { background: #42424a; }
+.reference-plan .tour-plan-actions .tour-plan-edit {
+  border-color: #e5e5ea;
+  background: #fff;
+  color: #777781;
+}
+.reference-plan .tour-plan-edit:hover { border-color: #d3d3dc; background: #f7f7f9; }
+.reference-plan .tour-plan-actions button:focus-visible { outline: 2px solid #75757f; outline-offset: 3px; }
+.reference-plan .tour-plan-actions button:disabled { opacity: .45; cursor: default; }
+
+.reference-plan .tour-plan-result {
+  gap: 6px;
+  padding: 11px 0 0;
+  border: 0;
+  color: #75757f;
+  font-size: 11px;
+  line-height: 19px;
+}
+.reference-plan.tour-plan-error .tour-plan-state { color: #9a604c; }
+
+/* Layout is reserved immediately; only the visual contents enter in order. */
+.reference-plan--animate .reference-plan-frame { animation: plan-card-enter 240ms ease-out both; }
+.reference-plan--animate .tour-plan-table tbody tr {
+  animation: plan-row-enter 240ms ease-out both;
+  animation-delay: calc(120ms + var(--plan-row, 0) * 150ms);
+}
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(1) { --plan-row: 0; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(2) { --plan-row: 1; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(3) { --plan-row: 2; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(4) { --plan-row: 3; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(5) { --plan-row: 4; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(6) { --plan-row: 5; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(7) { --plan-row: 6; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(8) { --plan-row: 7; }
+.reference-plan--animate .tour-plan-confirm { animation: plan-row-enter 240ms ease-out 1370ms both; }
+.reference-plan--animate .tour-plan-confirm:focus-within { animation: none; }
+
+@keyframes plan-card-enter {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes plan-row-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 550px) {
+  .reference-plan .tour-plan-label-column { width: 88px; }
+  .reference-plan .tour-plan-table tbody th,
+  .reference-plan .tour-plan-table tbody td { padding: 7px 11px; font-size: 11px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reference-plan--animate .reference-plan-frame,
+  .reference-plan--animate .tour-plan-table tbody tr,
+  .reference-plan--animate .tour-plan-confirm { animation: none; opacity: 1; transform: none; }
+}
