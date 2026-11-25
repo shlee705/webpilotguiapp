@@ -30,10 +30,10 @@ export default function TourPlanCard({ plan, onStart, onEdit, disabled = false, 
       <tbody>
         <tr><th scope="row">대상 URL</th><td><span className="tour-plan-url">{plan.targetUrl}</span></td></tr>
         <tr><th scope="row">탐색 범위</th><td>동일 출처 사이트 내부</td></tr>
-        <tr><th scope="row">로그인</th><td>{plan.loginEnabled ? ((pending || retryable) && !credentialsReady ? '계정 다시 입력 필요' : '지정한 계정으로 로그인') : '로그인 없이 진행'}</td></tr>
+        <tr><th scope="row">로그인</th><td>{plan.loginEnabled ? ((pending || retryable) && !credentialsReady ? '계정 다시 입력 필요' : '지정한 계정으로 로그인') : '계정 미지정 · 로그인 화면 확인 가능'}</td></tr>
         <tr><th scope="row">화면</th><td>데스크톱 · 최대화 Edge</td></tr>
-        <tr><th scope="row">입력 범위</th><td>일반 검색·텍스트{plan.loginEnabled && ' · 로그인'} <span className="tour-plan-value-note">· 사이트 내부만</span></td></tr>
-        <tr><th scope="row">동작 한도</th><td>최대 {plan.maxActions}회 <span className="tour-plan-value-note">· 클릭·입력·스크롤</span></td></tr>
+        <tr><th scope="row">입력 범위</th><td>검색·제목·본문·글 등록{plan.loginEnabled && ' · 로그인'} <span className="tour-plan-value-note">· 요청한 제한 반영</span></td></tr>
+        <tr><th scope="row">탐색 횟수</th><td>{plan.maxActions}회 <span className="tour-plan-value-note">· 지시한 대상 우선, 횟수 도달 시 완료</span></td></tr>
         <tr><th scope="row">모델</th><td><span className="tour-plan-model">{modelName}</span></td></tr>
         <tr><th scope="row">예상 시간</th><td className="tour-plan-time">페이지·응답 속도에 따라 달라짐</td></tr>
       </tbody>

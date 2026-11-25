@@ -1,6 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { validateTargetUrl, validateAction, validateDomAction, matchesLoginRequest, requestPolicy, VIEWPORT, waitForPageReady, typingDelay, readWithNavigationRecovery, SitePolicyError } = require('../electron/site-browser.cjs');
+const { validateTargetUrl, validateAction, validateDomAction, matchesLoginRequest, matchesContentSubmission, validateTaskPermissions, isForbiddenContentContext, requestPolicy, VIEWPORT, waitForPageReady, typingDelay, readWithNavigationRecovery, SitePolicyError, SiteInteractionError, sanitizeInteractionError, isStandaloneButton, isSensitiveControl, normalizeInputText, inputChunks } = require('../electron/site-browser.cjs');
+
+test('standalone default-submit buttons are safe only with no form or submission semantics', () => {
+  const standalone = { type: 'submit', disabled: false, hasFormOwner: false, inForm: false, hasFormAttribute: false, hasSubmitOverrides: false };
+  assert.equal(isStandaloneButton(standalone), true);
+  assert.equal(isStandaloneButton({ ...standalone, type: 'button' }), true);
+  for (const override of [{ type: 'reset' }, { disabled: true }, { hasFormOwner: true }, { inForm: true }, { hasFormAttribute: true }, { hasSubmitOverrides: true }]) {
+    assert.equal(isStandaloneButton({ ...standalone, ...override }), false);
+  }
+  assert.equal(isStandaloneButton(undefined), false);
+  assert.equal(isStandaloneButton({ type: 'submit' }), false);
+});
 
 test('site URL policy permits HTTP(S) only, without embedded credentials or mutating paths', () => {
   assert.equal(validateTargetUrl('http://localhost:8000/path').origin, 'http://localhost:8000');
@@ -18,17 +29,33 @@ test('navigation stays on the exact origin including protocol and port', () => {
   assert.equal(policy({ url: 'https://cdn.example.com/image.png', navigation: false }), null);
 });
 
-test('only bounded left clicks, scrolls and printable short text are accepted', () => {
+test('editor navigation is distinct from publishing and sample account shortcuts', () => {
+  for (const label of ['글쓰기', '게시글 작성', '새 게시글', '게시판', 'Write a post', 'Create post']) assert.equal(isSensitiveControl(label), false, label);
+  for (const label of ['게시', '게시글 게시', '게시글 작성 후 발행', 'Publish post', 'Submit', '삭제', '관리자 계정', '학생 계정', '관리자 123456 / fixture', '학생 654321 / sample', '샘플 계정 입력', 'Demo account', 'ID: fixture / password: sample']) assert.equal(isSensitiveControl(label), true, label);
+});
+
+test('draft text allows LF and normalizes CRLF without allowing other control characters', () => {
+  assert.equal(normalizeInputText('제목\r\n본문'), '제목\n본문');
+  assert.equal(normalizeInputText('제목\r본문'), '제목\n본문');
+  assert.equal(normalizeInputText('가'.repeat(4000)).length, 4000);
+  for (const value of ['', ' \n', '가'.repeat(4001), 'a\vb', 'a\tb', 'a\u0000b', 'a\u202eb', 'a\u2028b']) assert.throws(() => normalizeInputText(value), SitePolicyError);
+  const id = '9f083b19-b5f8-4847-bc30-bd3a93aa6451';
+  assert.equal(validateDomAction({ action: 'type', element_id: id, text: 'one\r\ntwo' }).text, 'one\ntwo');
+  assert.equal(validateAction({ type: 'type', x: 1, y: 1, text: 'one\r\ntwo' }).text, 'one\ntwo');
+});
+
+test('only bounded left clicks, scrolls and valid draft text are accepted', () => {
   assert.equal(validateAction({ type: 'click', x: 10, y: 20 }).type, 'click');
   assert.equal(validateAction({ type: 'scroll', x: 10, y: 20, scroll_x: 0, scroll_y: 500 }).type, 'scroll');
   assert.equal(validateAction({ type: 'type', x: 10, y: 20, text: 'WebPilot 검색' }).type, 'type');
   for (const action of [
     { type: 'click', x: VIEWPORT.width, y: 0 }, { type: 'click', x: -1, y: 0 }, { type: 'click', x: NaN, y: 20 },
     { type: 'click', x: 10, y: 20, button: 'right' }, { type: 'click', x: 10, y: 20, code: 'anything' },
-    { type: 'type', text: 'password' }, { type: 'type', x: 1, y: 1, text: 'a'.repeat(201) },
-    { type: 'type', x: 1, y: 1, text: 'hello\nsubmit' }, { type: 'type', x: 1, y: 1, text: 'hello\u0000' },
+    { type: 'type', text: 'password' }, { type: 'type', x: 1, y: 1, text: 'a'.repeat(4001) },
+    { type: 'type', x: 1, y: 1, text: 'hello\vsubmit' }, { type: 'type', x: 1, y: 1, text: 'hello\u0000' },
     { type: 'type', x: 1, y: 1, text: '\u202ehidden' }, { type: 'type', x: 1, y: 1, text: '' },
     { type: 'keypress', keys: ['WIN'] }, { type: 'scroll', x: 10, y: 20, scroll_x: 0, scroll_y: 100000 },
+    { type: 'scroll', x: 10, y: 20, scroll_x: 0, scroll_y: 0 },
   ]) assert.throws(() => validateAction(action));
   assert.equal(validateAction({ type: 'click', x: 1600, y: 900 }, { width: 1920, height: 1080 }).type, 'click');
   assert.throws(() => validateAction({ type: 'click', x: 900, y: 500 }, { width: 800, height: 600 }));
@@ -37,14 +64,56 @@ test('only bounded left clicks, scrolls and printable short text are accepted', 
 test('DOM actions accept only opaque element IDs and bounded operations', () => {
   const id = '9f083b19-b5f8-4847-bc30-bd3a93aa6451';
   assert.equal(validateDomAction({ action: 'click', element_id: id }).action, 'click');
+  assert.equal(validateDomAction({ action: 'submit', element_id: id }).action, 'submit');
   assert.equal(validateDomAction({ action: 'type', element_id: id, text: 'Search docs' }).text, 'Search docs');
   assert.equal(validateDomAction({ action: 'login' }).action, 'login');
   assert.equal(validateDomAction({ action: 'scroll', scroll_y: 500 }).scroll_y, 500);
   for (const action of [
     { action: 'click', element_id: '#delete' }, { action: 'evaluate', text: 'window.close()' },
-    { action: 'click', element_id: id, selector: 'button' }, { action: 'type', element_id: id, text: 'x\n' },
-    { action: 'scroll', scroll_y: 1201 }, { action: 'scroll', scroll_y: NaN },
+    { action: 'click', element_id: id, selector: 'button' }, { action: 'type', element_id: id, text: 'x\t' },
+    { action: 'scroll', scroll_y: 1201 }, { action: 'scroll', scroll_y: NaN }, { action: 'scroll', scroll_y: 0 },
   ]) assert.throws(() => validateDomAction(action));
+  assert.throws(() => validateDomAction({ action: 'submit' }));
+});
+
+test('content submission needs a valid trusted task permission object', () => {
+  assert.equal(validateTaskPermissions(undefined).allowContentSubmission, false);
+  assert.deepEqual(validateTaskPermissions({ allowContentSubmission: true, contentKinds: ['notice', 'post'] }), { allowContentSubmission: true, contentKinds: ['notice', 'post'] });
+  for (const value of [true, [], null, { allowContentSubmission: 'yes', contentKinds: ['notice'] }, { allowContentSubmission: true, contentKinds: ['payment'] }, { allowContentSubmission: true, contentKinds: ['post'], endpoint: '/anything' }]) assert.throws(() => validateTaskPermissions(value), SitePolicyError);
+});
+
+test('new editor form names remain allowed while edit and update tokens stay blocked', () => {
+  for (const description of ['/notices post-editor 공지 등록', '/articles article_editor 새 글 등록', 'content editor Publish post']) assert.equal(isForbiddenContentContext(description), false, description);
+  for (const description of ['/posts/edit', 'post-edit', 'post_update', 'update', 'Edit post', '공지 수정', 'payment editor', 'delete post']) assert.equal(isForbiddenContentContext(description), true, description);
+});
+
+test('content POST gate binds one submitted form to its exact text and field values', () => {
+  const permit = { allowedOrigin: 'https://example.com', mode: 'spa', submitted: true, used: false, expires: 2000, contentKind: 'notice',
+    fields: { title: 'QA title', body: 'first\nsecond', category: '학과', secret: false, pinned: false }, checkboxValues: { secret: 'on', pinned: 'on' } };
+  const payload = { ...permit.fields, board: 'notices' };
+  const request = { url: 'https://example.com/api/posts', method: 'POST', mainFrame: true, navigation: false, contentType: 'application/json', body: JSON.stringify(payload) };
+  assert.equal(matchesContentSubmission(request, permit, 1000), true);
+  for (const override of [
+    { url: 'https://outside.example/api/posts' }, { url: 'https://example.com/api/posts/123' }, { url: 'https://example.com/api/delete/posts' },
+    { url: 'https://example.com/api/payments/posts' }, { url: 'https://example.com/api/account/posts' }, { url: 'https://example.com/api/posts?delete=1' },
+    { method: 'PATCH' }, { method: 'DELETE' }, { mainFrame: false }, { navigation: true }, { contentType: 'multipart/form-data' },
+  ]) assert.equal(matchesContentSubmission({ ...request, ...override }, permit, 1000), false);
+  for (const delta of [{ title: 'changed' }, { body: 'changed' }, { category: 'other' }, { secret: true }, { pinned: true }, { board: 'articles' }, { userId: 'administrator' }, { amount: '10' }, { body: { nested: 'value' } }]) {
+    assert.equal(matchesContentSubmission({ ...request, body: JSON.stringify({ ...payload, ...delta }) }, permit, 1000), false);
+  }
+  assert.equal(matchesContentSubmission(request, { ...permit, used: true }, 1000), false);
+  assert.equal(matchesContentSubmission(request, { ...permit, submitted: false }, 1000), false);
+  assert.equal(matchesContentSubmission(request, permit, 2001), false);
+  assert.equal(matchesContentSubmission({ ...request, body: JSON.stringify({ ...payload, body: 'first\r\nsecond' }) }, permit, 1000), true);
+});
+
+test('HTML content submission accepts exact form fields once and blocks duplicates', () => {
+  const permit = { allowedOrigin: 'https://example.com', mode: 'html', url: 'https://example.com/articles', submitted: true, used: false, expires: 2000, contentKind: 'article',
+    fields: { title: 'QA title', content: 'body', category: 'news', secret: false, pinned: true }, checkboxValues: { secret: 'on', pinned: 'on' } };
+  const request = { url: permit.url, method: 'POST', mainFrame: true, navigation: true, contentType: 'application/x-www-form-urlencoded', body: 'title=QA+title&content=body&category=news&pinned=on' };
+  assert.equal(matchesContentSubmission(request, permit, 1000), true);
+  for (const body of [request.body + '&title=second', request.body + '&secret=on', request.body.replace('&pinned=on', ''), request.body + '&operation=delete']) assert.equal(matchesContentSubmission({ ...request, body }, permit, 1000), false);
+  assert.equal(matchesContentSubmission({ ...request, url: 'https://example.com/api/articles' }, permit, 1000), false);
 });
 
 test('login exception is a single exact native form POST with the provided account pair', () => {
@@ -130,6 +199,35 @@ test('typing retains per-key events with at most 120ms intentional pacing per fi
     assert.ok(Number.isInteger(delay) && delay >= 0 && delay <= 6);
     assert.ok(length * delay <= 120);
   }
+});
+
+test('long native input chunks are bounded and never split Unicode code points', () => {
+  const text = `${'가'.repeat(99)}😀${'한국어🙂'.repeat(800)}`;
+  const chunks = inputChunks(text);
+  assert.equal(chunks.join(''), text);
+  assert.ok(chunks.length > 30);
+  for (const chunk of chunks) {
+    assert.ok(Array.from(chunk).length <= 100);
+    assert.equal(chunk.isWellFormed(), true);
+  }
+  assert.deepEqual(inputChunks(''), []);
+  assert.deepEqual(inputChunks('short'), ['short']);
+});
+
+test('uncertain input errors remain fatal without exposing private diagnostics', () => {
+  const timeout = new Error('Timeout typing secret-value at private selector');
+  const policy = new SitePolicyError('Input field changed');
+  assert.equal(sanitizeInteractionError(policy), policy);
+  assert.equal(sanitizeInteractionError(policy, { privateInputStarted: true }), policy);
+  for (const [error, options] of [[timeout, { privateInputStarted: true }], [timeout, { inputStarted: true }], [policy, { inputStarted: true }]]) {
+    const safe = sanitizeInteractionError(error, options);
+    assert.ok(safe instanceof SiteInteractionError);
+    assert.equal(safe instanceof SitePolicyError, false);
+    assert.doesNotMatch(safe.message, /secret-value|private selector/);
+    assert.equal(safe.cause, undefined);
+  }
+  const cancelled = new DOMException('Cancelled', 'AbortError');
+  assert.equal(sanitizeInteractionError(cancelled, { inputStarted: true, privateInputStarted: true }), cancelled);
 });
 
 test('readiness reads recover across delayed document replacement without repeating an action', async () => {

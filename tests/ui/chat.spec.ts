@@ -209,7 +209,7 @@ test('URL prompts create a local plan before native execution and preserve DOM-t
   const assistant = stored[0].messages.find((message: any) => message.source === 'openai');
   expect(assistant.source).toBe('openai');
   expect(assistant.usage.totalTokens).toBe(60);
-  expect(assistant.activity).toMatchObject({ phase: 'complete', visitedCount: 3, actionCount: 5 });
+  expect(assistant.activity).toMatchObject({ phase: 'complete', visitedCount: 3, actionCount: 10 });
   expect(assistant.captures).toBeUndefined();
   expect(await page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
   await expect(page.locator('.capture-card')).toHaveCount(0);
@@ -328,7 +328,7 @@ test('pending tour settings update URL, model and action limit; login controls r
   await page.getByLabel('대상 URL', { exact: true }).fill('https://example.org/updated');
   await page.getByLabel('버그 탐색 요청', { exact: true }).fill('새 사이트의 메뉴를 확인해 줘');
   await page.getByLabel('탐색 모델', { exact: true }).selectOption('gpt-6.2-sol');
-  await page.getByLabel('동작 한도', { exact: true }).fill('23');
+  await page.getByLabel('탐색 횟수', { exact: true }).fill('23');
   const login = page.getByRole('checkbox', { name: '로그인 계정 사용' });
   await login.check();
   await expect(page.getByLabel('사이트 비밀번호', { exact: true })).toHaveAttribute('type', 'password');
@@ -341,8 +341,8 @@ test('pending tour settings update URL, model and action limit; login controls r
   await expect(page.getByRole('dialog')).toHaveCount(0);
   const plan = page.getByRole('region', { name: '버그 탐색 계획' });
   await expect(plan).toContainText('https://example.org/updated');
-  await expect(plan).toContainText('최대 23회');
-  await expect(plan).toContainText('로그인 없이 진행');
+  await expect(plan).toContainText('23회');
+  await expect(plan).toContainText('계정 미지정 · 로그인 화면 확인 가능');
   expect(await page.evaluate(() => (window as any).__native.requests)).toEqual([]);
   await page.getByRole('button', { name: '시작하기', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
@@ -350,6 +350,25 @@ test('pending tour settings update URL, model and action limit; login controls r
   expect(await page.evaluate(() => (window as any).__native.requests[0].messages.at(-1).content)).toContain('새 사이트의 메뉴를 확인해 줘');
   expect(await page.evaluate(() => (window as any).__native.requests[0].credentials)).toBeUndefined();
   await expect(page.locator('.assistant-message .message-actions')).toBeVisible();
+});
+
+test('Markdown URL and multiple priority instructions reach the native agent with draft text intact', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  const prompt = '[http://127.0.0.1:5173/](http://127.0.0.1:5173/)에서 로그인 화면을 먼저 확인해 줘.\n그다음 공지사항과 글쓰기 입력을 확인해 줘.\n제목은 QA 입력 확인, 본문은 다음 두 줄로 입력해 줘:\n첫 번째 줄\n두 번째 줄';
+  await send(page, prompt);
+  const plan = page.getByRole('region', { name: '버그 탐색 계획' });
+  await expect(plan.locator('.tour-plan-url')).toHaveText('http://127.0.0.1:5173/');
+  await expect(plan).toContainText('검색·제목·본문·글 등록');
+  await expect(plan).toContainText('10회');
+  await expect(plan).toContainText('지시한 대상 우선, 횟수 도달 시 완료');
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
+  const request = await page.evaluate(() => (window as any).__native.requests[0]);
+  expect(request.targetUrl).toBe('http://127.0.0.1:5173/');
+  expect(request.maxActions).toBe(10);
+  expect(request.messages.at(-1).content).toContain(prompt);
+  expect(request.credentials).toBeUndefined();
 });
 
 test('prompt credentials stay transient and are sent only in the dedicated native field', async ({ page }) => {
@@ -479,7 +498,7 @@ test('action limit accepts positive integers above five and rejects invalid valu
   await page.goto('/');
   await send(page, 'https://example.com 버그를 탐색해 줘');
   await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
-  const limit = page.getByLabel('동작 한도', { exact: true });
+  const limit = page.getByLabel('탐색 횟수', { exact: true });
   await expect(limit).toHaveAttribute('type', 'number');
   for (const value of ['', '0', '-1', '1.5']) {
     await limit.fill(value);
@@ -492,10 +511,10 @@ test('action limit accepts positive integers above five and rejects invalid valu
   await expect(page.getByRole('alert')).toContainText('1 이상의 정수');
   await limit.fill('125');
   await page.getByRole('button', { name: '설정 적용', exact: true }).click();
-  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toContainText('최대 125회');
+  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toContainText('125회');
   await page.reload();
   await page.locator('.history-select').filter({ hasText: 'https://example.com' }).click();
-  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toContainText('최대 125회');
+  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toContainText('125회');
   await page.getByRole('button', { name: '시작하기', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__native.requests[0]?.maxActions)).toBe(125);
 });
@@ -687,7 +706,7 @@ test('failed work can restart with the same settings and attach a report only af
   await page.getByRole('button', { name: '다시 시도', exact: true }).click();
   await expect(page.getByRole('button', { name: '보고서 열기', exact: true })).toBeEnabled();
   expect(await page.evaluate(() => (window as any).__native.requests.length)).toBe(2);
-  expect(await page.evaluate(() => (window as any).__native.requests.map((request: any) => [request.targetUrl, request.model, request.maxActions]))).toEqual(Array(2).fill(['https://example.com/', 'gpt-6-luna', 5]));
+  expect(await page.evaluate(() => (window as any).__native.requests.map((request: any) => [request.targetUrl, request.model, request.maxActions]))).toEqual(Array(2).fill(['https://example.com/', 'gpt-6-luna', 10]));
   await expect(page.locator('.tour-plan-complete')).toBeVisible();
 });
 

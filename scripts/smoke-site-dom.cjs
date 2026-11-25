@@ -111,7 +111,9 @@ async function main() {
     assert.equal((await session.observe()).url, `${origin}/inside`);
     await session.close();
     session = await startSiteSession({ url: `${origin}/login` });
-    assert.equal((await session.observe()).loginAvailable, false);
+    const noCredentialsView = await session.observe();
+    assert.equal(noCredentialsView.loginFormVisible, true);
+    assert.equal(noCredentialsView.loginAvailable, false);
     await assert.rejects(session.act({ action: 'login' }), /계정이 제공되지/);
     await session.close();
     session = await startSiteSession({ url: `${origin}/external-login`, credentials });

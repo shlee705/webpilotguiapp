@@ -13,8 +13,144 @@ const SENSITIVE_INPUT = /(?:password|passwd|\bpwd\b|secret|token|api[\s_-]*key|c
 const LOGIN_LABEL = /(?:log\s*in|sign[\s_-]*in|로그인)/i;
 const LOGIN_DANGER = /(?:register|registration|sign[\s_-]*up|create[\s_-]*account|reset|forgot|change[\s_-]*password|checkout|payment|purchase|delete|회원\s*가입|가입|비밀번호\s*(?:변경|찾기|재설정)|결제|구매|삭제)/i;
 const AUTH_PATH = /(?:^|\/)(?:login|signin|sign-in|authenticate|auth|session)(?:\/|$)/i;
+const CONTENT_ENDPOINT = /\/(posts|articles|notices)\/?$/i;
+const CONTENT_SUBMIT_LABEL = /(?:공지|게시글|글|내용)?\s*(?:등록|게시|발행)|(?:publish|submit|create|post)(?:\s+(?:a\s+)?(?:post|article|notice))?/i;
+const CONTENT_DANGER = /(?:delete|remove|destroy|payment|purchase|checkout|transfer|withdraw|account|profile|password|login|sign[ -]?up|삭제|제거|결제|구매|송금|계정|비밀번호|로그인|회원|수정)|(?:^|[\/\s_-])(?:update|edit)(?=$|[\/\s_-])/i;
+const CONTENT_KINDS = Object.freeze(['notice', 'post', 'article']);
+
+function isForbiddenContentContext(description) { return CONTENT_DANGER.test(description); }
+
+function validateTaskPermissions(value) {
+  if (value === undefined) return { allowContentSubmission: false, contentKinds: [] };
+  if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.allowContentSubmission !== 'boolean'
+    || !Array.isArray(value.contentKinds) || value.contentKinds.some(kind => !CONTENT_KINDS.includes(kind))
+    || Object.keys(value).some(key => !['allowContentSubmission', 'contentKinds'].includes(key))) throw new SitePolicyError('올바른 콘텐츠 등록 권한이 필요합니다.');
+  return { allowContentSubmission: value.allowContentSubmission, contentKinds: [...new Set(value.contentKinds)] };
+}
+
+function matchesContentSubmission(request, permit, now = Date.now()) {
+  if (!permit || permit.used || now > permit.expires || request.method !== 'POST' || !request.mainFrame || !permit.submitted) return false;
+  let target;
+  try { target = new URL(request.url); } catch { return false; }
+  if (target.origin !== permit.allowedOrigin || target.username || target.password || !CONTENT_ENDPOINT.test(target.pathname)
+    || isBlockedPath(target) || isForbiddenContentContext(target.pathname + target.search) || target.search || target.hash) return false;
+  if (permit.mode === 'html' ? !request.navigation || request.url !== permit.url : request.navigation) return false;
+  if (typeof request.body !== 'string' || Buffer.byteLength(request.body) > 32768) return false;
+  let values;
+  const formEncoded = /^application\/x-www-form-urlencoded(?:;|$)/i.test(request.contentType ?? '');
+  if (formEncoded) {
+    const fields = new URLSearchParams(request.body);
+    if ([...fields.keys()].some(key => fields.getAll(key).length !== 1)) return false;
+    values = Object.fromEntries(fields);
+  } else if (permit.mode === 'spa' && /^application\/json(?:;|$)/i.test(request.contentType ?? '')) {
+    try { values = JSON.parse(request.body); } catch { return false; }
+    if (!values || typeof values !== 'object' || Array.isArray(values) || Object.values(values).some(value => !['string', 'boolean'].includes(typeof value))) return false;
+  } else return false;
+  const expected = permit.fields;
+  if (Object.keys(values).some(key => !Object.hasOwn(expected, key) && key !== 'board')) return false;
+  const aliases = { notice: ['notice', 'notices'], post: ['post', 'posts'], article: ['article', 'articles'] };
+  if (!Object.hasOwn(expected, 'board') && Object.hasOwn(values, 'board') && !aliases[permit.contentKind]?.includes(values.board)) return false;
+  for (const [key, value] of Object.entries(expected)) {
+    if (formEncoded && typeof value === 'boolean') {
+      if (value ? values[key] !== permit.checkboxValues?.[key] : Object.hasOwn(values, key)) return false;
+    } else if (typeof value === 'string') {
+      if (typeof values[key] !== 'string' || values[key].replace(/\r\n?/g, '\n') !== value.replace(/\r\n?/g, '\n')) return false;
+    } else if (values[key] !== value) return false;
+  }
+  return true;
+}
+
+// Fixed browser-side inspection; values remain in the native one-shot permit.
+function readContentForm(element) {
+  const visible = field => field?.isConnected && field.getClientRects().length > 0 && getComputedStyle(field).visibility !== 'hidden' && !field.disabled && !field.readOnly && !field.closest('[inert]');
+  if (!(element instanceof HTMLFormElement) || !visible(element) || element.target && element.target.toLowerCase() !== '_self' || element.enctype !== 'application/x-www-form-urlencoded') return null;
+  const controls = Array.from(element.elements);
+  if (controls.some(field => !field.disabled && field.validity && !field.validity.valid)) return null;
+  const titles = controls.filter(field => field instanceof HTMLInputElement && field.type === 'text' && /^(?:title|subject|headline)$/i.test(field.name) && visible(field));
+  const bodies = controls.filter(field => field instanceof HTMLTextAreaElement && /^(?:body|content|message|text)$/i.test(field.name) && visible(field));
+  const submits = controls.filter(field => (field instanceof HTMLButtonElement || field instanceof HTMLInputElement) && field.type === 'submit' && visible(field));
+  if (titles.length !== 1 || bodies.length !== 1 || submits.length !== 1) return null;
+  const [title] = titles, [body] = bodies, [submit] = submits;
+  if (!title.value.trim() || !body.value.trim() || title.value.length > 1000 || body.value.length > 4000 || !title.validity.valid || !body.validity.valid) return null;
+  if (['formaction', 'formmethod', 'formtarget', 'formenctype', 'formnovalidate'].some(name => submit.hasAttribute(name))) return null;
+  const fields = {}, checkboxValues = {};
+  for (const field of controls) {
+    if (field.disabled || field instanceof HTMLButtonElement || field instanceof HTMLInputElement && ['submit', 'button', 'reset'].includes(field.type)) continue;
+    if (!field.name || Object.hasOwn(fields, field.name)) return null;
+    if (field === title || field === body) fields[field.name] = field.value;
+    else if (field instanceof HTMLSelectElement && field.type === 'select-one' && /^(?:category|board|section)$/i.test(field.name) && visible(field)) fields[field.name] = field.value;
+    else if (field instanceof HTMLInputElement && field.type === 'checkbox' && /^(?:secret|pinned)$/i.test(field.name) && visible(field)) { fields[field.name] = field.checked; checkboxValues[field.name] = field.value; }
+    else if (field instanceof HTMLInputElement && field.type === 'hidden' && /^(?:board|category|_?csrf(?:[_-]?token)?|_?xsrf(?:[_-]?token)?|authenticity_token|__RequestVerificationToken)$/i.test(field.name)) fields[field.name] = field.value;
+    else return null;
+  }
+  const label = (submit.getAttribute('aria-label') || submit.textContent || submit.value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  const description = [location.pathname, element.id, element.name, element.getAttribute('aria-label'), label].join(' ');
+  const contentKind = /notice|공지/i.test(description) ? 'notice' : /article|기사/i.test(description) ? 'article' : 'post';
+  return { url: element.action, mode: element.getAttribute('action') && element.method.toLowerCase() === 'post' ? 'html' : 'spa', method: element.method,
+    label, description, contentKind, title: title.value, fields, checkboxValues, submitIndex: controls.indexOf(submit) };
+}
+const SAMPLE_ACCOUNT = /(?:예시|샘플|체험|데모)\s*계정|(?:sample|demo|example)\s*(?:account|credentials)|^(?:관리자|학생)\s*계정(?:\s*(?:사용|입력|로그인))?$|^(?:관리자|학생)\s+\d{4,}\s*\/\s*\S+|(?:user(?:name)?|아이디|\bID)\s*[:：]\s*\S+\s*(?:\/|[,;])\s*(?:pass(?:word)?|비밀번호)\s*[:：]/i;
+
+function isSensitiveControl(label) {
+  // Opening an editor is a read-only UI transition; publishing it is not.
+  const withoutEditorEntry = String(label).replace(/게시글\s*(?:작성|쓰기)|게시판|글쓰기|새\s*게시글|(?:create|write|new)\s+(?:a\s+)?post/gi, '');
+  return SAMPLE_ACCOUNT.test(String(label).trim()) || SENSITIVE_LABEL.test(withoutEditorEntry);
+}
+
+function normalizeInputText(text) {
+  if (typeof text !== 'string') throw new SitePolicyError('입력할 텍스트가 필요합니다.');
+  const normalized = text.replace(/\r\n?/g, '\n');
+  if (!normalized.trim() || normalized.length > 4000 || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(normalized.replace(/\n/g, ''))) {
+    throw new SitePolicyError('입력은 줄바꿈을 제외한 제어 문자가 없는 4000자 이하의 텍스트만 허용됩니다.');
+  }
+  return normalized;
+}
+
+// Evaluated in the page, both while observing and immediately before typing.
+function readPageElement(element) {
+  const rect = element.getBoundingClientRect();
+  if (!rect.width || !rect.height || rect.right <= 0 || rect.bottom <= 0 || rect.left >= innerWidth || rect.top >= innerHeight || getComputedStyle(element).visibility === 'hidden' || element.closest('[inert]') || element.disabled || element.getAttribute('aria-disabled') === 'true') return null;
+  const native = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
+  const editable = element instanceof HTMLElement && element.isContentEditable && !element.parentElement?.isContentEditable;
+  if (!native && !editable) {
+    if (!(element instanceof HTMLButtonElement || element instanceof HTMLAnchorElement) || element.closest('form')) return null;
+    if (element instanceof HTMLAnchorElement && (element.download || element.hasAttribute('download') || element.target && element.target.toLowerCase() !== '_self')) return null;
+    const label = [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 240);
+    return { role: element instanceof HTMLAnchorElement ? 'link' : 'button', label, description: label, type: 'click', href: element instanceof HTMLAnchorElement ? element.href : undefined,
+      button: element instanceof HTMLButtonElement ? { type: element.type, disabled: element.disabled, hasFormOwner: Boolean(element.form), inForm: Boolean(element.closest('form')),
+        hasFormAttribute: element.hasAttribute('form'), hasSubmitOverrides: ['formaction', 'formmethod', 'formtarget', 'formenctype', 'formnovalidate'].some(name => element.hasAttribute(name)) } : undefined };
+  }
+  if (element instanceof HTMLInputElement && !['text', 'search', 'url'].includes(element.type)) return null;
+  if (element.disabled || element.readOnly || element.closest('[inert]') || element.getAttribute('aria-disabled') === 'true' || element.getAttribute('aria-readonly') === 'true') return null;
+  const labelText = label => {
+    const parts = [];
+    const walker = document.createTreeWalker(label, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode()) && parts.join(' ').length < 240) {
+      if (!node.parentElement?.isContentEditable && !node.parentElement?.closest('input,textarea,select,script,style,[aria-hidden="true"]')) parts.push(node.textContent);
+    }
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  };
+  const label = (element.getAttribute('aria-label')?.trim() || Array.from(element.labels ?? []).map(labelText).filter(Boolean).join(' ')
+    || element.getAttribute('title') || element.getAttribute('placeholder') || element.getAttribute('data-placeholder') || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  const form = element.form ?? element.closest('form');
+  return { role: 'textbox', label, type: editable ? 'contenteditable' : element.type, multiline: editable || element instanceof HTMLTextAreaElement,
+    description: [element.type, element.name, element.id, element.getAttribute('placeholder'), element.getAttribute('data-placeholder'), element.autocomplete, label, form?.action, form?.id, form?.name].filter(Boolean).join(' ') };
+}
 
 function typingDelay(length) { return Math.min(6, Math.floor(120 / Math.max(1, length))); }
+function inputChunks(text) {
+  const points = Array.from(text);
+  const chunks = [];
+  for (let index = 0; index < points.length; index += 100) chunks.push(points.slice(index, index + 100).join(''));
+  return chunks;
+}
+
+function isStandaloneButton(button) {
+  return Boolean(button && ['button', 'submit'].includes(button.type)
+    && button.disabled === false && button.hasFormOwner === false && button.inForm === false
+    && button.hasFormAttribute === false && button.hasSubmitOverrides === false);
+}
 
 async function readWithNavigationRecovery({ read, recover, assertActive = () => {}, signal }) {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -57,10 +193,10 @@ async function waitForPageReady({ read, signal, expectChange = false, now = Date
 
 function validateDomAction(action) {
   if (!action || typeof action !== 'object' || Array.isArray(action)) throw new SitePolicyError('허용된 사이트 동작이 아닙니다.');
-  if (!['click', 'type', 'scroll', 'login'].includes(action.action) || Object.keys(action).some(key => !['action', 'element_id', 'text', 'scroll_y'].includes(key))) throw new SitePolicyError('허용된 사이트 동작이 아닙니다.');
-  if (['click', 'type'].includes(action.action) && (typeof action.element_id !== 'string' || !/^[a-f0-9-]{36}$/.test(action.element_id))) throw new SitePolicyError('현재 페이지에서 제공한 요소 ID가 필요합니다.');
-  if (action.action === 'type') validateAction({ type: 'type', x: 1, y: 1, text: action.text });
-  if (action.action === 'scroll' && (!Number.isFinite(action.scroll_y) || Math.abs(action.scroll_y) > 1200)) throw new SitePolicyError('스크롤 범위가 허용 한도를 초과했습니다.');
+  if (!['click', 'type', 'scroll', 'login', 'submit'].includes(action.action) || Object.keys(action).some(key => !['action', 'element_id', 'text', 'scroll_y'].includes(key))) throw new SitePolicyError('허용된 사이트 동작이 아닙니다.');
+  if (['click', 'type', 'submit'].includes(action.action) && (typeof action.element_id !== 'string' || !/^[a-f0-9-]{36}$/.test(action.element_id))) throw new SitePolicyError('현재 페이지에서 제공한 요소 ID가 필요합니다.');
+  if (action.action === 'type') return { ...action, text: normalizeInputText(action.text) };
+  if (action.action === 'scroll' && (!Number.isFinite(action.scroll_y) || action.scroll_y === 0 || Math.abs(action.scroll_y) > 1200)) throw new SitePolicyError('0이 아닌 허용 범위의 스크롤 값이 필요합니다.');
   return action;
 }
 
@@ -88,6 +224,16 @@ class SitePolicyError extends Error {
   constructor(message) { super(message); this.name = 'SitePolicyError'; }
 }
 
+class SiteInteractionError extends Error {
+  constructor(message = '페이지 입력 또는 동작의 완료 여부를 확인할 수 없어 중지했습니다. 같은 동작을 자동으로 다시 실행하지 않습니다.') { super(message); this.name = 'SiteInteractionError'; }
+}
+
+function sanitizeInteractionError(error, { inputStarted = false, privateInputStarted = false } = {}) {
+  if (error?.name === 'AbortError') return error;
+  if (inputStarted || privateInputStarted && !(error instanceof SitePolicyError)) return new SiteInteractionError();
+  return error;
+}
+
 function validateTargetUrl(value) {
   if (typeof value !== 'string' || value.length > 8192) throw new SitePolicyError('올바른 웹사이트 URL이 필요합니다.');
   let url;
@@ -113,11 +259,9 @@ function validateAction(action, viewport = VIEWPORT) {
   }
   if (action.type === 'click' && action.button !== undefined && action.button !== 'left') throw new SitePolicyError('왼쪽 클릭만 허용됩니다.');
   if (action.type === 'scroll') {
-    if (!Number.isFinite(action.scroll_x) || !Number.isFinite(action.scroll_y) || Math.abs(action.scroll_x) > 640 || Math.abs(action.scroll_y) > 1200) throw new SitePolicyError('스크롤 범위가 허용 한도를 초과했습니다.');
+    if (!Number.isFinite(action.scroll_x) || !Number.isFinite(action.scroll_y) || action.scroll_x === 0 && action.scroll_y === 0 || Math.abs(action.scroll_x) > 640 || Math.abs(action.scroll_y) > 1200) throw new SitePolicyError('0이 아닌 허용 범위의 스크롤 값이 필요합니다.');
   }
-  if (action.type === 'type' && (typeof action.text !== 'string' || !action.text.trim() || action.text.length > 200 || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(action.text))) {
-    throw new SitePolicyError('입력은 줄바꿈과 제어 문자가 없는 200자 이하의 텍스트만 허용됩니다.');
-  }
+  if (action.type === 'type') return { ...action, text: normalizeInputText(action.text) };
   return action;
 }
 
@@ -131,10 +275,11 @@ function requestPolicy({ url, method, navigation, ownedPage }, allowedOrigin) {
   return null;
 }
 
-async function startSiteSession({ url: input, signal, onStatus = () => {}, credentials: suppliedCredentials }) {
+async function startSiteSession({ url: input, signal, onStatus = () => {}, credentials: suppliedCredentials, taskPermissions: suppliedTaskPermissions }) {
   const target = validateTargetUrl(input);
   const credentials = validateCredentials(suppliedCredentials);
   const redact = createSecretRedactor(credentials);
+  const taskPermissions = validateTaskPermissions(suppliedTaskPermissions);
   signal?.throwIfAborted();
   const allowedOrigin = target.origin;
   let browser;
@@ -151,6 +296,10 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
   let consecutiveRedirects = 0;
   let pendingNavigation;
   let loginPermit;
+  let contentPermit;
+  let submissionAttempted = false;
+  let submissionResult;
+  const submissionElements = new Set();
   let loginAttempted = false;
   let privateInputStarted = false;
   let loginInputInProgress = false;
@@ -170,6 +319,8 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
     if (closePromise) return closePromise;
     closed = true;
     loginPermit = undefined;
+    contentPermit = undefined;
+    submissionElements.clear();
     elementSnapshot.clear();
     activeRequests.clear();
     focusController?.close();
@@ -216,27 +367,56 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       let mainFrame = false;
       try { ownedPage = request.frame().page() === page; } catch { /* No worker requests are trusted. */ }
       try { mainFrame = request.frame() === page.mainFrame(); } catch { /* Worker requests cannot authenticate. */ }
-      const loginRequest = ownedPage && matchesLoginRequest({ url: request.url(), method: request.method(), navigation: request.isNavigationRequest(), mainFrame, contentType: request.headers()['content-type'], body: request.postData() }, loginPermit, credentials);
-      let reason = loginRequest ? null : requestPolicy({ url: request.url(), method: request.method(), navigation: request.isNavigationRequest(), ownedPage }, allowedOrigin);
+      const requestDetails = { url: request.url(), method: request.method(), navigation: request.isNavigationRequest(), mainFrame, contentType: request.headers()['content-type'], body: request.postData() };
+      const loginRequest = ownedPage && matchesLoginRequest(requestDetails, loginPermit, credentials);
+      if (ownedPage && mainFrame && request.method() === 'POST' && contentPermit && !contentPermit.used) {
+        contentPermit.submitted ||= await page.evaluate(() => window.__webpilotContentForm?.submitted()).catch(() => false);
+      }
+      const contentRequest = ownedPage && matchesContentSubmission(requestDetails, contentPermit);
+      let reason = loginRequest || contentRequest ? null : requestPolicy({ url: request.url(), method: request.method(), navigation: request.isNavigationRequest(), ownedPage }, allowedOrigin);
       if (loginInputInProgress && !loginRequest) reason = '로그인 입력 중 부가 네트워크 요청';
       if (privateInputStarted && new URL(request.url()).origin !== allowedOrigin) reason = '로그인 입력 이후 외부 연결';
       if (credentials && redact(request.url()) !== request.url()) reason = '계정 정보가 포함된 URL 요청';
       if (reason) { if (request.isNavigationRequest()) pendingNavigation = undefined; blocked(reason); await route.abort('blockedbyclient').catch(() => {}); return; }
       let finishLogin;
+      let finishContent;
       const loginMode = loginRequest ? loginPermit.mode : undefined;
       const matchedLoginPermit = loginRequest ? loginPermit : undefined;
+      const matchedContentPermit = contentRequest ? contentPermit : undefined;
       if (loginRequest) {
         loginPermit.used = true;
         loginInputInProgress = false;
         loginPermit.completion = new Promise(resolve => { finishLogin = resolve; });
       }
-      if (!request.isNavigationRequest() && !loginRequest) { await route.continue().catch(() => {}); return; }
+      if (contentRequest) {
+        contentPermit.used = true;
+        contentPermit.completion = new Promise(resolve => { finishContent = resolve; });
+      }
+      if (!request.isNavigationRequest() && !loginRequest && !contentRequest) { await route.continue().catch(() => {}); return; }
       try {
         // Chromium's normal redirect chain bypasses subsequent Playwright routes.
         // Fetch one hop only, then turn an allowed redirect into a fresh navigation.
         const response = await route.fetch({ maxRedirects: 0, timeout: 20000 });
+        if (matchedContentPermit) {
+          matchedContentPermit.httpStatus = response.status();
+          if (/application\/json/i.test(response.headers()['content-type'] ?? '')) {
+            const bytes = await response.body();
+            if (bytes.length <= 1048576) {
+              try {
+                const data = JSON.parse(bytes.toString('utf8'));
+                const created = data?.post ?? data?.article ?? data?.notice ?? data;
+                const id = typeof created?.id === 'number' || typeof created?.id === 'string' ? String(created.id) : '';
+                if (/^[a-zA-Z0-9_-]{1,128}$/.test(id)) matchedContentPermit.createdId = id;
+              } catch { /* HTTP response is known; malformed JSON is not proof of success. */ }
+            }
+          }
+        }
         const location = response.headers().location;
         if ([301, 302, 303, 307, 308].includes(response.status()) && location) {
+          if (matchedContentPermit?.mode === 'spa') {
+            matchedContentPermit.failure = '등록 요청 뒤 리디렉션 응답이 발생하여 완료 여부를 확인할 수 없습니다.';
+            await route.abort('blockedbyclient'); return;
+          }
           if (loginMode === 'spa') {
             matchedLoginPermit.failure = 'SPA 인증 응답이 리디렉션을 요구하여 로그인을 중지했습니다. 이 인증 흐름은 지원하지 않습니다.';
             blocked('SPA 인증 요청의 리디렉션은 지원하지 않습니다');
@@ -266,10 +446,11 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         await route.fulfill({ response });
       } catch (error) {
         if (matchedLoginPermit) matchedLoginPermit.failure = '로그인 요청의 응답을 완료하지 못했습니다.';
+        if (matchedContentPermit) matchedContentPermit.failure = '등록 요청의 응답을 확인하지 못했습니다. 중복 등록을 막기 위해 다시 제출하지 않습니다.';
         pendingNavigation = undefined;
         if (!closed) blocked('탐색 요청을 완료할 수 없음');
         await route.abort('failed').catch(() => {});
-      } finally { finishLogin?.(); }
+      } finally { finishLogin?.(); finishContent?.(); }
     });
     if (typeof context.routeWebSocket === 'function') {
       await context.routeWebSocket('**/*', socket => { blocked('WebSocket 연결'); socket.close(); });
@@ -280,17 +461,36 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       let loginForm;
       let loginExpiry = 0;
       let loginMode;
+      let loginSubmitted = false;
+      let contentForm;
+      let contentSubmitter;
+      let contentExpiry = 0;
+      let contentMode;
+      let contentSubmitted = false;
       Object.defineProperty(window, '__webpilotLoginForm', { value: Object.freeze({
-        arm(form, mode) { loginForm = form; loginMode = mode; loginExpiry = Date.now() + 5000; },
-        clear() { loginForm = undefined; loginExpiry = 0; loginMode = undefined; },
+        arm(form, mode) { loginForm = form; loginMode = mode; loginExpiry = Date.now() + 5000; loginSubmitted = false; },
+        submitted: () => loginSubmitted,
+        clear() { loginForm = undefined; loginExpiry = 0; loginMode = undefined; loginSubmitted = false; },
+      }), configurable: false, writable: false });
+      Object.defineProperty(window, '__webpilotContentForm', { value: Object.freeze({
+        arm(form, submitter, mode) { contentForm = form; contentSubmitter = submitter; contentMode = mode; contentExpiry = Date.now() + 5000; contentSubmitted = false; },
+        submitted: () => contentSubmitted,
+        clear() { contentForm = undefined; contentSubmitter = undefined; contentExpiry = 0; contentMode = undefined; contentSubmitted = false; },
       }), configurable: false, writable: false });
       document.addEventListener('submit', event => {
-        const allowed = event.target === loginForm && Date.now() < loginExpiry;
-        const mode = loginMode;
+        const allowedLogin = event.target === loginForm && Date.now() < loginExpiry;
+        const allowedContent = event.target === contentForm && event.submitter === contentSubmitter && Date.now() < contentExpiry;
+        const allowed = allowedLogin || allowedContent;
+        const mode = allowedContent ? contentMode : loginMode;
         loginForm = undefined; loginExpiry = 0;
+        contentForm = undefined; contentSubmitter = undefined; contentExpiry = 0;
+        if (allowedLogin) loginSubmitted = true;
+        if (allowedContent) contentSubmitted = true;
         // Permit one native HTML submission; page submit handlers never receive
         // a reusable privilege. Network policy independently validates the body.
-        if (!allowed) event.preventDefault();
+        // SPA handlers may handle this one submit, but native GET submission
+        // must never put credentials in the URL.
+        if (!allowed || mode === 'spa') event.preventDefault();
         if (!allowed || mode !== 'spa') event.stopImmediatePropagation();
       }, true);
       document.addEventListener('click', event => {
@@ -313,7 +513,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
           || [...record.addedNodes, ...record.removedNodes].some(node => !ignored(node))))) changedAt = Date.now();
       });
       observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['aria-busy', 'hidden', 'disabled'] });
-      addEventListener('scroll', () => { changedAt = Date.now(); }, { passive: true });
+      addEventListener('scroll', () => { changedAt = Date.now(); }, { passive: true, capture: true });
       Object.defineProperty(window, '__webpilotPageActivity', { configurable: false, writable: false, value: Object.freeze({
         read: () => ({ ready: document.readyState !== 'loading', changedAt, quietForMs: Math.max(0, Date.now() - changedAt),
           busy: [...document.querySelectorAll('[aria-busy="true"]')].some(element => element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden') }),
@@ -438,6 +638,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
     const clearSnapshot = async () => {
       const handles = [...elementSnapshot.values()];
       elementSnapshot.clear();
+      submissionElements.clear();
       await Promise.allSettled(handles.map(handle => handle.dispose()));
     };
     const challengePresent = () => page.evaluate(() => {
@@ -483,6 +684,41 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       if (found.length !== 1) { await Promise.all(found.map(item => item.form.dispose())); return null; }
       return found[0];
     };
+    const detectContentForm = async () => {
+      if (!taskPermissions.allowContentSubmission || submissionAttempted) return null;
+      const found = [];
+      for (const form of await page.$$('form')) {
+        const metadata = await form.evaluate(readContentForm).catch(() => null);
+        let allowed = metadata && taskPermissions.contentKinds.includes(metadata.contentKind)
+          && CONTENT_SUBMIT_LABEL.test(metadata.label) && !isForbiddenContentContext(metadata.description)
+          && Object.values(metadata.fields).every(value => typeof value !== 'string' || redact(value) === value);
+        if (allowed) {
+          try {
+            const destination = validateTargetUrl(metadata.url);
+            allowed = destination.origin === allowedOrigin && (metadata.mode !== 'html' || CONTENT_ENDPOINT.test(destination.pathname));
+          } catch { allowed = false; }
+        }
+        if (allowed) found.push({ form, metadata });
+        else await form.dispose();
+      }
+      if (found.length !== 1) { await Promise.allSettled(found.map(item => item.form.dispose())); return null; }
+      return found[0];
+    };
+    const contentEvidence = title => page.evaluate(expected => {
+      const parts = [];
+      const walker = document.createTreeWalker(document.body ?? document.documentElement, NodeFilter.SHOW_TEXT);
+      let node, total = 0;
+      while ((node = walker.nextNode()) && total < 16000) {
+        const parent = node.parentElement;
+        if (!parent || parent.isContentEditable || parent.closest('form,input,textarea,select,script,style,[aria-hidden="true"],[hidden],[data-webpilot-visual-pointer]') || !parent.getClientRects().length || getComputedStyle(parent).visibility === 'hidden') continue;
+        const text = node.textContent.replace(/\s+/g, ' ').trim();
+        if (text) { parts.push(text); total += text.length; }
+      }
+      const text = parts.join(' ').replace(/\s+/g, ' ');
+      const normalizedTitle = expected.replace(/\s+/g, ' ').trim();
+      return { url: location.href, titleCount: normalizedTitle ? text.split(normalizedTitle).length - 1 : 0,
+        completed: /(?:등록|게시|발행)(?:이|가)?\s*(?:되었습니다|완료|성공)|(?:created|published|posted)\s*(?:successfully)?/i.test(text) };
+    }, title);
     const checkedPoint = async handle => {
       assertActive();
       if (!await handle.isVisible() || !await handle.isEnabled()) throw new SitePolicyError('선택한 요소가 더 이상 표시되지 않습니다. 페이지를 다시 읽어 주세요.');
@@ -536,7 +772,18 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         await clickPointer();
         markAction();
         await page.mouse.click(point.x, point.y, { button: 'left' });
-        while (!loginPermit.used && Date.now() < loginPermit.expires) { await page.waitForTimeout(30); assertActive(); }
+        let clientTransition = false;
+        while (!loginPermit.used && Date.now() < loginPermit.expires) {
+          if (metadata.mode === 'spa') {
+            const submitted = await page.evaluate(() => window.__webpilotLoginForm?.submitted()).catch(() => false);
+            if (submitted) {
+              const formStillVisible = await form.evaluate(element => element.isConnected && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden').catch(() => true);
+              clientTransition = !formStillVisible || page.url() !== metadata.url;
+              if (clientTransition) break;
+            }
+          }
+          await page.waitForTimeout(30); assertActive();
+        }
         await loginPermit.completion;
         await settlePage();
         const used = loginPermit?.used;
@@ -544,8 +791,9 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         loginPermit = undefined;
         assertActive();
         if (failure) throw new SitePolicyError(failure);
-        if (!used) throw new SitePolicyError('허용된 로그인 요청이 발생하지 않았습니다. 일반 HTML 또는 표준 JSON/form 인증 요청만 지원합니다.');
+        if (!used && !clientTransition) throw new SitePolicyError('로그인 폼 제출 이후 허용된 인증 요청이나 화면 전환을 확인하지 못했습니다.');
         if (await challengePresent()) throw new SitePolicyError('추가 인증 또는 CAPTCHA가 필요하여 자동 탐색을 중지했습니다.');
+        if (!used) return { message: '제공된 계정으로 로그인 폼을 제출한 뒤 화면 전환을 확인했습니다. 서버 인증 요청은 없었으므로 로그인 성공 여부는 확인하지 않았습니다.', url: redact(page.url()) };
         return { message: '제공된 계정으로 동일 사이트의 로그인 폼을 제출했습니다. 로그인 결과는 페이지에 표시된 내용을 확인합니다.', url: redact(page.url()) };
       } catch (error) {
         if (signal?.aborted) signal.throwIfAborted();
@@ -557,6 +805,56 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         await Promise.allSettled([user, password, submit, form].filter(Boolean).map(handle => handle.dispose()));
       }
     };
+    const submitContent = async elementId => {
+      if (submissionAttempted) throw new SitePolicyError('이번 작업에서는 콘텐츠 등록을 한 번만 허용합니다. 다시 제출하지 않습니다.');
+      if (!taskPermissions.allowContentSubmission || !submissionElements.has(elementId)) throw new SitePolicyError('현재 작업과 페이지에서 허용된 콘텐츠 등록 버튼이 아닙니다.');
+      const expected = elementSnapshot.get(elementId);
+      const detected = await detectContentForm();
+      if (!expected || !detected) throw new SitePolicyError('작성 폼이 변경되었거나 등록 조건이 충족되지 않았습니다. 페이지를 다시 읽어 주세요.');
+      const { form, metadata } = detected;
+      let submit;
+      try {
+        submit = (await form.evaluateHandle((element, index) => element.elements[index], metadata.submitIndex)).asElement();
+        if (!submit || !await expected.evaluate((element, current) => element === current, submit)) throw new SitePolicyError('등록 버튼이 변경되었습니다. 페이지를 다시 읽어 주세요.');
+        const point = await checkedPoint(submit);
+        await movePointer(point.x, point.y);
+        const current = await checkedPoint(submit);
+        if (Math.abs(current.x - point.x) > 2 || Math.abs(current.y - point.y) > 2) throw new SitePolicyError('등록 버튼이 이동했습니다. 페이지를 다시 읽어 주세요.');
+        const rechecked = await form.evaluate(readContentForm);
+        if (JSON.stringify(rechecked) !== JSON.stringify(metadata)) throw new SitePolicyError('등록 직전에 작성 내용 또는 폼이 변경되었습니다. 페이지를 다시 읽어 주세요.');
+        const before = await contentEvidence(metadata.title);
+        contentPermit = { ...metadata, allowedOrigin, submitted: false, used: false, expires: Date.now() + 5000 };
+        await form.evaluate((element, { submitter, mode }) => window.__webpilotContentForm.arm(element, submitter, mode), { submitter: submit, mode: metadata.mode });
+        await clickPointer();
+        submissionAttempted = true;
+        markAction();
+        await page.mouse.click(point.x, point.y, { button: 'left' });
+        while (!contentPermit.used && Date.now() < contentPermit.expires) { await sleep(30, undefined, { signal }); assertActive(); }
+        if (!contentPermit.used) throw new SiteInteractionError('등록 버튼을 클릭했지만 허용된 등록 요청을 확인하지 못했습니다. 중복 등록을 막기 위해 다시 제출하지 않습니다.');
+        await contentPermit.completion;
+        if (contentPermit.failure || !Number.isInteger(contentPermit.httpStatus)) throw new SiteInteractionError(contentPermit.failure);
+        await settlePage(); assertActive();
+        const after = await contentEvidence(metadata.title);
+        const formClosed = await form.evaluate(element => !element.isConnected || !element.getClientRects().length || getComputedStyle(element).visibility === 'hidden').catch(() => true);
+        const idInPath = contentPermit.createdId && new URL(after.url).pathname.split('/').includes(contentPermit.createdId);
+        const confirmed = after.titleCount > 0 && (idInPath && after.url !== before.url || formClosed && after.titleCount > before.titleCount && after.completed);
+        const httpStatus = contentPermit.httpStatus;
+        const status = httpStatus >= 400 ? 'rejected' : httpStatus >= 200 && httpStatus < 300 && confirmed ? 'confirmed' : 'unverified';
+        const message = status === 'confirmed' ? '등록 요청의 응답과 새 글이 표시된 화면을 확인했습니다.'
+          : status === 'rejected' ? `등록 요청에 HTTP ${httpStatus} 오류 응답이 반환되었습니다. 다시 제출하지 않습니다.`
+            : '등록 요청의 서버 응답은 받았지만 화면에서 등록 완료를 확인하지 못했습니다. 다시 제출하지 않습니다.';
+        submissionResult = { status, httpStatus, message };
+        return { message, url: redact(page.url()), performed: true, submission: { ...submissionResult } };
+      } catch (error) {
+        if (signal?.aborted) signal.throwIfAborted();
+        if (submissionAttempted) throw error instanceof SiteInteractionError ? error : new SiteInteractionError('등록 동작의 완료 여부를 확인할 수 없어 중지했습니다. 중복 등록을 막기 위해 다시 제출하지 않습니다.');
+        throw error;
+      } finally {
+        contentPermit = undefined;
+        await page.evaluate(() => window.__webpilotContentForm?.clear()).catch(() => {});
+        await Promise.allSettled([submit, form].filter(Boolean).map(handle => handle.dispose()));
+      }
+    };
 
     const session = {
       async observe() {
@@ -564,10 +862,11 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         await foreground();
         await settlePage();
         await clearSnapshot();
-        if (credentials && await challengePresent()) throw new SitePolicyError('추가 인증 또는 CAPTCHA가 필요하여 자동 탐색을 중지했습니다.');
+        const challenge = await challengePresent();
+        if (credentials && challenge) throw new SitePolicyError('추가 인증 또는 CAPTCHA가 필요하여 자동 탐색을 중지했습니다.');
         const view = await page.evaluate(() => {
           const visible = element => {
-            if (!element || element.closest('input,textarea,select,script,style,noscript,[aria-hidden="true"],[contenteditable="true"],[data-webpilot-visual-pointer]')) return false;
+            if (!element || element.isContentEditable || element.closest('input,textarea,select,script,style,noscript,[aria-hidden="true"],[data-webpilot-visual-pointer]')) return false;
             const rect = element.getBoundingClientRect();
             return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== 'hidden' && getComputedStyle(element).display !== 'none';
           };
@@ -582,20 +881,9 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
           return { title: document.title.slice(0, 300), text: parts.join('\n').slice(0, 10000), viewport: { width: innerWidth, height: innerHeight } };
         });
         const elements = [];
-        const candidates = await page.$$('a[href],button,input,textarea');
+        const candidates = await page.$$('a[href],button,input,textarea,[contenteditable]');
         const discarded = [];
-        const readCandidate = handle => handle.evaluate(element => {
-          const rect = element.getBoundingClientRect();
-          if (!rect.width || !rect.height || rect.right <= 0 || rect.bottom <= 0 || rect.left >= innerWidth || rect.top >= innerHeight || getComputedStyle(element).visibility === 'hidden' || element.closest('[inert]') || element.disabled || element.getAttribute('aria-disabled') === 'true') return null;
-          const input = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
-          // Never expose control values, password fields, or credential metadata.
-          if (input && (element.readOnly || element instanceof HTMLInputElement && !['text', 'search', 'url'].includes(element.type))) return null;
-          if (!input && (element.closest('form') || element instanceof HTMLButtonElement && (element.type !== 'button' || element.form))) return null;
-          if (element instanceof HTMLAnchorElement && (element.download || element.hasAttribute('download') || element.target && element.target.toLowerCase() !== '_self')) return null;
-          const label = [element.getAttribute('aria-label'), element.getAttribute('title'), input ? element.placeholder : element.textContent, ...Array.from(element.labels ?? []).map(label => label.textContent)].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 240);
-          return { role: input ? 'textbox' : element instanceof HTMLAnchorElement ? 'link' : 'button', label, type: input ? element.type : 'click', href: element instanceof HTMLAnchorElement ? element.href : undefined,
-            description: input ? [element.type, element.name, element.id, element.placeholder, element.autocomplete, label, element.form?.action, element.form?.id, element.form?.name].filter(Boolean).join(' ') : label };
-        }).catch(() => null);
+        const readCandidate = handle => handle.evaluate(readPageElement).catch(() => null);
         let cursor = 0;
         while (cursor < candidates.length && elements.length < 60) {
           const batch = candidates.slice(cursor, cursor + 12);
@@ -605,7 +893,8 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
             const handle = batch[index];
             const metadata = metadataBatch[index];
             if (elements.length >= 60) { discarded.push(handle); continue; }
-            let permitted = metadata && !(metadata.role === 'textbox' ? SENSITIVE_INPUT.test(metadata.description) : SENSITIVE_LABEL.test(metadata.description));
+            let permitted = metadata && !(metadata.role === 'textbox' ? SENSITIVE_INPUT.test(metadata.description) : isSensitiveControl(metadata.description));
+            if (metadata?.role === 'button') permitted &&= isStandaloneButton(metadata.button);
             if (metadata?.href) {
               try { permitted &&= validateTargetUrl(metadata.href).origin === allowedOrigin && redact(metadata.href) === metadata.href; } catch { permitted = false; }
             }
@@ -617,11 +906,23 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         }
         discarded.push(...candidates.slice(cursor));
         await Promise.allSettled(discarded.map(handle => handle.dispose()));
-        const form = credentials && !loginAttempted && !await challengePresent() ? await detectLoginForm() : null;
-        const loginAvailable = Boolean(form);
+        const form = !challenge ? await detectLoginForm() : null;
+        const loginFormVisible = Boolean(form);
+        const loginAvailable = Boolean(form && credentials && !loginAttempted);
         await form?.form.dispose();
         if (credentials && !loginAttempted && !loginAvailable && await visiblePasswordPresent()) throw new SitePolicyError('로그인 입력란이 있지만 지원되는 동일 사이트 로그인 폼을 확인하지 못해 탐색을 중지했습니다. 외부 SSO·복잡한 인증 화면은 지원하지 않습니다.');
-        return { url: redact(page.url()), title: redact(view.title), text: redact(view.text), viewport: view.viewport, elements, loginAvailable };
+        const contentForm = await detectContentForm();
+        if (contentForm) {
+          const submit = (await contentForm.form.evaluateHandle((element, index) => element.elements[index], contentForm.metadata.submitIndex)).asElement();
+          if (submit) {
+            const id = randomUUID(); elementSnapshot.set(id, submit); submissionElements.add(id);
+            elements.unshift({ id, role: 'submit', type: 'submit', label: redact(contentForm.metadata.label) });
+            if (elements.length > 60) { const removed = elements.pop(); await elementSnapshot.get(removed.id)?.dispose(); elementSnapshot.delete(removed.id); }
+          }
+          await contentForm.form.dispose();
+        }
+        return { url: redact(page.url()), title: redact(view.title), text: redact(view.text), viewport: view.viewport, elements, loginFormVisible, loginAvailable,
+          submissionAvailable: submissionElements.size > 0, ...(submissionResult ? { submission: { ...submissionResult } } : {}) };
       },
       async act(rawAction) {
         const action = validateDomAction(rawAction);
@@ -629,6 +930,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         lastBlocked = '';
         try {
           if (action.action === 'login') { await foreground(); return await login(); }
+          if (action.action === 'submit') { await foreground(); return await submitContent(action.element_id); }
           if (action.action === 'scroll') {
             const viewport = await viewportSize();
             return await session.perform({ type: 'scroll', x: Math.floor(viewport.width / 2), y: Math.floor(viewport.height / 2), scroll_x: 0, scroll_y: action.scroll_y });
@@ -641,8 +943,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
           return await session.perform({ type: action.action, ...point, ...(action.action === 'type' ? { text: action.text } : {}) }, handle);
         } catch (error) {
           if (signal?.aborted) signal.throwIfAborted();
-          if (privateInputStarted && !(error instanceof SitePolicyError)) throw new SitePolicyError('페이지 동작을 완료하지 못했습니다. 페이지를 다시 읽어 주세요.');
-          throw error;
+          throw sanitizeInteractionError(error, { privateInputStarted });
         } finally { await clearSnapshot(); }
       },
       async capture() {
@@ -668,6 +969,8 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         }
         const action = validateAction(rawAction, viewport);
         lastBlocked = '';
+        let performed = true;
+        let inputStarted = false;
         if (action.type === 'click') {
           await movePointer(action.x, action.y);
           if (expectedHandle) {
@@ -679,16 +982,17 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
             const candidate = hit?.closest('a[href],button');
             if (!(candidate instanceof HTMLAnchorElement || candidate instanceof HTMLButtonElement)) return { allowed: false, reason: '링크와 일반 버튼만 클릭할 수 있습니다.' };
             if (candidate.closest('form') || candidate.closest('[inert]') || candidate.getAttribute('aria-disabled') === 'true') return { allowed: false, reason: '폼 또는 비활성 요소는 조작할 수 없습니다.' };
-            if (candidate instanceof HTMLButtonElement && (candidate.disabled || candidate.type !== 'button' || candidate.form)) return { allowed: false, reason: '제출 버튼과 폼 버튼은 조작할 수 없습니다.' };
             const label = [candidate.textContent, candidate.getAttribute('aria-label'), candidate.getAttribute('title'), candidate.getAttribute('name')].filter(Boolean).join(' ').slice(0, 1000);
             if (candidate instanceof HTMLAnchorElement) {
               if (candidate.download || candidate.hasAttribute('download') || (candidate.target && candidate.target.toLowerCase() !== '_self')) return { allowed: false, reason: '새 창과 다운로드 링크는 허용되지 않습니다.' };
               return { allowed: true, label, href: candidate.href };
             }
-            return { allowed: true, label };
+            return { allowed: true, label, button: { type: candidate.type, disabled: candidate.disabled, hasFormOwner: Boolean(candidate.form), inForm: Boolean(candidate.closest('form')),
+              hasFormAttribute: candidate.hasAttribute('form'), hasSubmitOverrides: ['formaction', 'formmethod', 'formtarget', 'formenctype', 'formnovalidate'].some(name => candidate.hasAttribute(name)) } };
           }, { x: action.x, y: action.y });
           if (!element.allowed) { blocked(element.reason); throw new SitePolicyError(element.reason); }
-          if (SENSITIVE_LABEL.test(element.label)) { blocked('민감하거나 상태를 변경할 수 있는 버튼'); throw new SitePolicyError('민감하거나 상태를 변경할 수 있는 버튼은 클릭하지 않습니다.'); }
+          if (element.button && !isStandaloneButton(element.button)) { blocked('폼에 연결되었거나 제출 동작을 가진 버튼'); throw new SitePolicyError('폼에 연결된 제출·초기화 버튼은 일반 클릭으로 조작할 수 없습니다.'); }
+          if (isSensitiveControl(element.label)) { blocked('민감하거나 상태를 변경할 수 있는 버튼'); throw new SitePolicyError('민감하거나 상태를 변경할 수 있는 버튼은 클릭하지 않습니다.'); }
           if (element.href) {
             const destination = validateTargetUrl(element.href);
             if (destination.origin !== allowedOrigin) { blocked('허용된 사이트 밖의 링크'); throw new SitePolicyError('허용된 사이트 밖의 링크는 클릭하지 않습니다.'); }
@@ -702,41 +1006,84 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
             const current = await checkedPoint(expectedHandle);
             if (Math.abs(current.x - action.x) > 2 || Math.abs(current.y - action.y) > 2) throw new SitePolicyError('입력란이 이동했습니다. 페이지를 다시 읽어 주세요.');
           }
-          const handle = await page.evaluateHandle(({ x, y }) => document.elementFromPoint(x, y), { x: action.x, y: action.y });
+          const handle = await page.evaluateHandle(({ x, y }) => {
+            let element = document.elementFromPoint(x, y);
+            if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) return element;
+            if (!element?.isContentEditable) return null;
+            while (element.parentElement?.isContentEditable) element = element.parentElement;
+            return element;
+          }, { x: action.x, y: action.y });
           try {
             const field = handle.asElement();
             if (!field) throw new SitePolicyError('입력할 수 있는 텍스트 필드가 아닙니다.');
-            const metadata = await field.evaluate(element => {
-              if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) return { allowed: false };
-              if (element instanceof HTMLInputElement && !['text', 'search', 'url'].includes(element.type)) return { allowed: false };
-              if (element.disabled || element.readOnly || element.closest('[inert]') || element.getAttribute('aria-disabled') === 'true') return { allowed: false };
-              return {
-                allowed: true,
-                description: [element.type, element.name, element.id, element.placeholder, element.autocomplete, element.getAttribute('aria-label'), element.getAttribute('title'), ...Array.from(element.labels ?? []).map(label => label.textContent), element.form?.action, element.form?.id, element.form?.name].filter(Boolean).join(' '),
-              };
-            });
-            if (!metadata.allowed || SENSITIVE_INPUT.test(metadata.description ?? '') || !(await field.isVisible()) || !(await field.isEnabled())) {
-              blocked('민감하거나 지원하지 않는 입력란');
-              throw new SitePolicyError('검색 등 일반 텍스트 입력란만 사용할 수 있습니다. 계정·비밀번호·개인정보·결제 필드는 입력하지 않습니다.');
-            }
+            if (expectedHandle && !await expectedHandle.evaluate((expected, current) => expected === current, field)) throw new SitePolicyError('입력 요소가 변경되었습니다. 페이지를 다시 읽어 주세요.');
+            const checkField = async () => {
+              assertActive();
+              const metadata = await field.evaluate(readPageElement);
+              if (metadata?.role !== 'textbox' || SENSITIVE_INPUT.test(metadata.description) || redact(action.text) !== action.text) {
+                blocked('민감하거나 지원하지 않는 입력란');
+                throw new SitePolicyError('일반 제목·본문·검색 입력란만 사용할 수 있습니다. 계정·비밀번호·개인정보·결제 필드는 입력하지 않습니다.');
+              }
+              if (!metadata.multiline && action.text.includes('\n')) throw new SitePolicyError('한 줄 입력란에는 줄바꿈을 입력할 수 없습니다. 여러 줄 텍스트는 본문 입력란을 선택해 주세요.');
+            };
+            await checkField();
             await clickPointer();
             markAction();
             await page.mouse.click(action.x, action.y, { button: 'left' });
             assertActive();
+            await checkField();
+            inputStarted = true;
             await field.fill('');
+            await checkField();
             const marker = randomUUID();
             await field.evaluate((element, marker) => element.setAttribute('data-webpilot-input-target', marker), marker);
-            try { await page.locator(`[data-webpilot-input-target="${marker}"]`).pressSequentially(action.text, { delay: typingDelay(action.text.length), timeout: 10000 }); }
+            const checkFocusedField = async () => {
+              await checkField();
+              if (!await field.evaluate(element => element.isConnected && document.activeElement === element)) throw new SitePolicyError('입력 중 포커스가 다른 요소로 이동하여 입력을 중지했습니다. 페이지를 다시 읽어 주세요.');
+            };
+            try {
+              const lines = action.text.split('\n');
+              for (let index = 0; index < lines.length; index++) {
+                signal?.throwIfAborted(); await checkFocusedField();
+                const target = page.locator(`[data-webpilot-input-target="${marker}"]`);
+                if (index) { await page.keyboard.insertText('\n'); await checkFocusedField(); }
+                if (action.text.length > 200) {
+                  for (const chunk of inputChunks(lines[index])) {
+                    signal?.throwIfAborted(); await checkFocusedField();
+                    // Native IME-style input keeps real input events while
+                    // avoiding thousands of individual protocol round trips.
+                    await page.keyboard.insertText(chunk);
+                  }
+                } else if (lines[index]) await target.pressSequentially(lines[index], { delay: typingDelay(action.text.length), timeout: 10000 });
+              }
+              await checkFocusedField();
+            }
             finally { await field.evaluate(element => element.removeAttribute('data-webpilot-input-target')).catch(() => {}); }
+          } catch (error) {
+            if (signal?.aborted) signal.throwIfAborted();
+            throw sanitizeInteractionError(error, { inputStarted });
           } finally { await handle.dispose(); }
         } else {
           await movePointer(action.x, action.y);
-          markAction(false);
-          await page.mouse.wheel(action.scroll_x, action.scroll_y);
+          const scrollState = await page.evaluateHandle(({ x, y }) => {
+            const elements = new Set([document.scrollingElement].filter(Boolean));
+            for (let element = document.elementFromPoint(x, y); element; element = element.parentElement) elements.add(element);
+            return { x: scrollX, y: scrollY, elements: [...elements].map(element => ({ element, x: element.scrollLeft, y: element.scrollTop })) };
+          }, { x: action.x, y: action.y });
+          try {
+            markAction();
+            await page.mouse.wheel(action.scroll_x, action.scroll_y);
+            await settlePage();
+            performed = await scrollState.evaluate(before => scrollX !== before.x || scrollY !== before.y
+              || before.elements.some(({ element, x, y }) => element.isConnected && (element.scrollLeft !== x || element.scrollTop !== y)));
+          } finally { await scrollState.dispose(); }
         }
-        await settlePage();
-        assertActive();
-        return { message: lastBlocked ? `차단: ${lastBlocked}` : action.type === 'click' ? '허용된 사이트 안에서 링크 또는 일반 버튼을 클릭했습니다.' : action.type === 'type' ? '일반 입력란에 텍스트를 입력했습니다. 제출하지 않았습니다.' : '허용된 사이트 화면을 스크롤했습니다.', url: redact(page.url()) };
+        try { await settlePage(); assertActive(); }
+        catch (error) {
+          if (signal?.aborted) signal.throwIfAborted();
+          throw sanitizeInteractionError(error, { inputStarted });
+        }
+        return { message: lastBlocked ? `차단: ${lastBlocked}` : action.type === 'click' ? '허용된 사이트 안에서 링크 또는 일반 버튼을 클릭했습니다.' : action.type === 'type' ? '일반 입력란에 텍스트를 입력했습니다. 제출하지 않았습니다.' : performed ? '허용된 사이트 화면을 스크롤했습니다.' : '스크롤 위치가 변하지 않았습니다. 다른 동작을 선택해 주세요.', url: redact(page.url()), performed: !lastBlocked && performed };
       },
       close,
     };
@@ -748,4 +1095,4 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
   }
 }
 
-module.exports = { startSiteSession, validateTargetUrl, validateAction, validateDomAction, matchesLoginRequest, requestPolicy, isBlockedPath, SitePolicyError, VIEWPORT, waitForPageReady, typingDelay, readWithNavigationRecovery };
+module.exports = { startSiteSession, validateTargetUrl, validateAction, validateDomAction, matchesLoginRequest, matchesContentSubmission, validateTaskPermissions, isForbiddenContentContext, requestPolicy, isBlockedPath, SitePolicyError, SiteInteractionError, sanitizeInteractionError, VIEWPORT, waitForPageReady, typingDelay, readWithNavigationRecovery, isStandaloneButton, isSensitiveControl, normalizeInputText, readPageElement, inputChunks };

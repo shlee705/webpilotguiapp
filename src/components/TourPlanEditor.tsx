@@ -29,9 +29,9 @@ export default function TourPlanEditor({ plan, onChange, onSubmit, error, creden
         <option value="custom">모델 ID 직접 입력</option>
       </select>
     </div><div>
-      <label htmlFor="tour-limit">동작 한도</label>
+      <label htmlFor="tour-limit">탐색 횟수</label>
       <input id="tour-limit" type="number" inputMode="numeric" min="1" step="1" required value={Number.isNaN(plan.maxActions) ? '' : plan.maxActions} onChange={event => onChange({ ...plan, maxActions: event.target.value === '' ? NaN : Number(event.target.value) })} aria-describedby="tour-limit-hint" />
-      <p id="tour-limit-hint" className="tour-input-hint">1 이상의 정수를 입력하세요.</p>
+      <p id="tour-limit-hint" className="tour-input-hint">1 이상의 정수. 요청한 대상을 먼저 확인하고, 실제 동작이 이 횟수에 도달하면 완료합니다.</p>
     </div></div>
     {customModel && <><label htmlFor="tour-custom-model">모델 ID</label><input id="tour-custom-model" value={plan.model} maxLength={120} onChange={event => onChange({ ...plan, model: event.target.value })} /></>}
     <div className="tour-login-fields">
@@ -42,7 +42,7 @@ export default function TourPlanEditor({ plan, onChange, onSubmit, error, creden
         <p className="tour-login-note">이번 작업에서만 사용합니다. 계정 정보는 대화 기록에 저장하거나 모델에 전달하지 않습니다.</p>
       </>}
     </div>
-    <p className="tour-editor-note">동일 출처의 사이트 안에서만 이동합니다. 지정한 계정의 로그인 외에 결제·삭제·다른 폼 제출은 진행하지 않습니다.</p>
+    <p className="tour-editor-note">동일 출처에서 로그인·입력·글 등록까지 스스로 진행합니다. 초안만 작성하거나 제출하지 않으려면 요청에 적어 주세요. 등록 결과는 서버 응답과 후속 화면을 확인합니다.</p>
     {error && <p className="field-error" role="alert">{error}</p>}
     <div className="dialog-actions"><button className="primary-button" type="submit">설정 적용</button></div>
   </form>;

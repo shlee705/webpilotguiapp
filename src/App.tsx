@@ -265,7 +265,7 @@ export default function App() {
     const chat = conversation ?? createConversation();
     const userMessage = createMessage('user', text);
     const assistantMessage: ChatMessage = targetUrl
-      ? { ...createMessage('assistant', '요청하신 사이트를 확인했습니다. 아래 설정으로 진행합니다.'), source: 'local', plan: { targetUrl, prompt: text, model: selectedModel, maxActions: 5, loginEnabled: !!parsed.credentials, state: 'pending' } }
+      ? { ...createMessage('assistant', '요청하신 사이트를 확인했습니다. 아래 설정으로 진행합니다.'), source: 'local', plan: { targetUrl, prompt: text, model: selectedModel, maxActions: 10, loginEnabled: !!parsed.credentials, state: 'pending' } }
       : { ...createMessage('assistant'), status: 'streaming', model: selectedModel, source: 'openai' };
     freshMessages.current.add(userMessage.id);
     freshMessages.current.add(assistantMessage.id);
@@ -316,7 +316,7 @@ export default function App() {
       const credentialError = plan.loginEnabled ? loginCredentialsError(credentials) : undefined;
       if (credentialError) { setPlanError(credentialError); return; }
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,199}$/.test(plan.model)) { setPlanError('올바른 모델 ID를 입력해 주세요. 예: gpt-6-luna'); return; }
-      if (!Number.isSafeInteger(plan.maxActions) || plan.maxActions < 1) { setPlanError('동작 한도는 1 이상의 정수로 입력해 주세요.'); return; }
+      if (!Number.isSafeInteger(plan.maxActions) || plan.maxActions < 1) { setPlanError('탐색 횟수는 1 이상의 정수로 입력해 주세요.'); return; }
       if (!plan.prompt) throw new Error();
       setConversations(previous => previous.map(item => item.id !== editingPlan.conversationId ? item : { ...item, updatedAt: new Date().toISOString(), messages: item.messages.map(message => message.id === editingPlan.messageId && message.plan && ['pending', 'error', 'cancelled'].includes(message.plan.state) ? { ...message, plan: { ...plan, state: 'pending' as const } } : message) }));
       if (plan.loginEnabled && credentials) planCredentials.current.set(editingPlan.messageId, credentials); else planCredentials.current.delete(editingPlan.messageId);

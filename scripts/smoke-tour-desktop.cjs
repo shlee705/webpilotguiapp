@@ -14,8 +14,14 @@ async function main() {
   const project = path.resolve(__dirname, '..');
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'webpilot-dom-tour-'));
   const credentials = { username: 'tour-fixture-user', password: 'tour-fixture-password' };
+  const draft = {
+    title: '요청한 글쓰기 초안 제목',
+    body: `첫째 줄: 사용자 요청의 순서대로 내용을 작성합니다.\r\n둘째 줄: 저장하거나 게시하지 않습니다.\r\n${'본문 입력과 줄바꿈을 확인하는 로컬 테스트입니다. '.repeat(20)}`,
+    editor: `편집기 첫째 줄\n편집기 둘째 줄\n${'일반 콘텐츠 초안을 입력합니다. '.repeat(260)}`.slice(0, 4000),
+  };
+  const expectedActions = ['click', 'login', 'click', 'type', 'type', 'type', 'click', 'scroll'];
   const stats = { loginPosts: 0, authenticatedPages: 0, authenticatedDetails: 0, unexpectedPosts: 0, acceptedCredentials: false };
-  const style = '<style>body{font:18px Arial;padding:45px;background:#f8faf5;color:#34452d}form{display:grid;gap:15px;max-width:380px}input,button,a{font:inherit;padding:12px;display:block}a{margin-top:25px}input{width:340px}p{line-height:1.8}</style>';
+  const style = '<style>body{font:16px Arial;padding:24px;background:#f8faf5;color:#34452d}h1{font-size:23px;margin:10px 0 16px}form{display:grid;gap:6px;max-width:650px}form[hidden],section[hidden],button[hidden]{display:none}input,textarea,button,[contenteditable]{font:inherit;padding:8px;box-sizing:border-box}input,textarea,[contenteditable]{width:640px;max-width:100%;background:white;border:1px solid #8d9787}textarea,[contenteditable]{height:70px;overflow:auto;white-space:pre-wrap}button{display:block;margin:10px 0}p{line-height:1.6}</style>';
   const page = (title, body) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>${style}</head><body>${body}</body></html>`;
   const fixture = http.createServer(async (request, response) => {
     response.setHeader('Connection', 'close');
@@ -32,18 +38,18 @@ async function main() {
     }
     if (request.url === '/favicon.ico') { response.writeHead(204); response.end(); return; }
     const authenticated = (request.headers.cookie ?? '').includes('webpilot_fixture=verified');
-    if (['/dashboard', '/inside'].includes(request.url) && !authenticated) {
+    if (['/dashboard', '/compose'].includes(request.url) && !authenticated) {
       response.writeHead(401); response.end('Session cookie required'); return;
     }
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     if (request.url === '/dashboard') {
       stats.authenticatedPages += 1;
-      response.end(page('Local dashboard', `<h1>Signed in local fixture</h1><p>Welcome ${credentials.username}</p><a href="/inside">Open internal details</a>`));
-    } else if (request.url === '/inside') {
+      response.end(page('Local dashboard', `<h1>Signed in local fixture</h1><p>Welcome ${credentials.username}</p><button id="writing-entry" onclick="location.href='/compose'">게시글 작성</button>`));
+    } else if (request.url === '/compose') {
       stats.authenticatedDetails += 1;
-      response.end(page('Local details', '<h1>Local details</h1><label for="tour-query">Fixture search</label><input type="search" id="tour-query" name="tour_query" aria-label="Fixture search" oninput="document.getElementById(\'typed-result\').textContent=\'Typed: \'+this.value"><p id="typed-result">Waiting for ordinary text</p>'));
+      response.end(page('Local writing fixture', '<h1>글쓰기 초안</h1><form id="draft-editor" action="/article" method="post"><label for="draft-title">제목</label><input id="draft-title" name="draft_title" type="text" aria-label="제목"><label for="draft-body">본문 초안</label><textarea id="draft-body" name="draft_body" aria-label="본문 초안"></textarea><label id="editor-label">본문 편집기</label><div id="draft-rich" contenteditable="true" role="textbox" aria-label="본문 편집기" aria-multiline="true"></div></form><button id="preview-button" onclick="document.getElementById(\'preview\').hidden=false">초안 미리보기</button><section id="preview" hidden><h2>초안 미리보기를 열었습니다</h2><div style="height:1300px">추가 화면을 살펴볼 수 있는 로컬 미리보기입니다.</div></section>'));
     } else {
-      response.end(page('Local login fixture', '<h1>Local login fixture</h1><form action="/session" method="post" aria-label="Login"><label for="account">Username</label><input id="account" name="username" type="text" autocomplete="username"><label for="secret">Password</label><input id="secret" name="password" type="password" autocomplete="current-password"><button type="submit">Log in</button></form>'));
+      response.end(page('Local login fixture', '<h1>Local login fixture</h1><button id="login-entry" onclick="document.getElementById(\'login-form\').hidden=false;this.hidden=true">로그인 화면 열기</button><form id="login-form" hidden action="/session" method="post" aria-label="Login"><label for="account">Username</label><input id="account" name="username" type="text" autocomplete="username"><label for="secret">Password</label><input id="secret" name="password" type="password" autocomplete="current-password"><button type="submit">Log in</button></form>'));
     }
   });
   await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
@@ -119,7 +125,7 @@ async function main() {
       const { chromium } = require('playwright-core');
       const originalLaunch = chromium.launch;
       let managedBrowser;
-      if (input.verifyPointer) chromium.launch = async options => {
+      chromium.launch = async options => {
         managedBrowser = await originalLaunch.call(chromium, options);
         return managedBrowser;
       };
@@ -135,6 +141,7 @@ async function main() {
       let modelAttempts = 0;
       let reportProviderCalls = 0;
       let pointerVerified = false;
+      const fixtureChecks = { loginUiOpened: false, titleEntered: false, multilineBodyEntered: false, contentEditableEntered: false, previewOpened: false, continuedAfterFinish: false, scrolled: false };
       const assertNoSecrets = value => {
         const text = JSON.stringify(value);
         for (const secret of [input.credentials.username, input.credentials.password, encodeURIComponent(input.credentials.username), encodeURIComponent(input.credentials.password)]) {
@@ -152,8 +159,8 @@ async function main() {
         const runStarted = performance.now();
         const result = await runSiteAgent({
           apiKey: 'fixture-key-never-sent-to-network', model: 'gpt-6-luna', targetUrl: input.url,
-          messages: [{ role: 'user', content: `로그인 후 내부 페이지로 이동해서 검색란에 ordinary tour text를 입력해 주세요. 계정 ${input.credentials.username}, 비밀번호 ${input.credentials.password}` }],
-          credentials: input.credentials, signal: controller.signal, maxActions: 5, finalizePauseMs: 0,
+          messages: [{ role: 'user', content: `로그인 화면을 열고 제공한 계정으로 로그인하세요. 그다음 게시글 작성 화면에 들어가 제목과 여러 줄 본문을 채우고 본문 편집기에도 입력하세요. 초안 미리보기를 열고 남은 동작은 페이지를 살펴보세요. 저장하거나 게시하지 마세요. 제목: ${input.draft.title}\n본문: ${input.draft.body}\n편집기 내용: ${input.draft.editor}\n계정 ${input.credentials.username}, 비밀번호 ${input.credentials.password}` }],
+          credentials: input.credentials, signal: controller.signal, maxActions: input.expectedActions.length, finalizePauseMs: 0,
           retryDelayMs: 0,
           ...(input.verifyReport ? { reportProvider: async ({ signal }) => {
             assert.equal(signal, controller.signal);
@@ -181,7 +188,7 @@ async function main() {
                 catch (error) {
                   let message = String(error.message ?? error);
                   for (const secret of [input.credentials.username, input.credentials.password, encodeURIComponent(input.credentials.username), encodeURIComponent(input.credentials.password)]) message = message.split(secret).join('[redacted]');
-                  timings.nativeActionErrors.push({ name: error.name, action: args[0]?.type, message });
+                  timings.nativeActionErrors.push({ name: error.name, action: args[0]?.type, message: message.slice(0, 1200) });
                   throw error;
                 }
               };
@@ -195,14 +202,34 @@ async function main() {
                 assertNoSecrets(action);
                 const result = await measure('act', action.action, () => session.act(action));
                 completedActions.push(action.action);
-                if (input.verifyForeground && action.action === 'type') {
+                const page = managedBrowser.contexts()[0].pages()[0];
+                if (completedActions.length === 1) {
+                  assert.equal(await page.locator('#login-form').isVisible(), true);
+                  fixtureChecks.loginUiOpened = true;
+                } else if (completedActions.length === 4) {
+                  assert.equal(await page.locator('#draft-title').inputValue(), input.draft.title);
+                  fixtureChecks.titleEntered = true;
+                } else if (completedActions.length === 5) {
+                  assert.equal(await page.locator('#draft-body').inputValue(), input.draft.body.replace(/\r\n/g, '\n'));
+                  fixtureChecks.multilineBodyEntered = true;
+                } else if (completedActions.length === 6) {
+                  assert.equal(await page.locator('#draft-rich').innerText(), input.draft.editor);
+                  fixtureChecks.contentEditableEntered = true;
+                } else if (completedActions.length === 7) {
+                  assert.equal(await page.locator('#preview').isVisible(), true);
+                  fixtureChecks.previewOpened = true;
+                  fixtureChecks.continuedAfterFinish = true;
+                } else if (completedActions.length === input.expectedActions.length) {
+                  assert.ok(await page.evaluate(() => scrollY) > 0, 'The remaining successful action must actually scroll the fixture.');
+                  fixtureChecks.scrolled = true;
+                }
+                if (input.verifyForeground && completedActions.length === input.expectedActions.length) {
                   const foreground = probeForeground();
                   timings.finalForeground = foreground;
                   assert.equal(foreground.pid, focusDiagnostics.at(-1).browserPid, `Actual OS foreground must be the owned Edge process: ${JSON.stringify(foreground)}`);
                   timings.foregroundVerified = true;
                 }
-                if (input.verifyPointer && action.action === 'type') {
-                  const page = managedBrowser.contexts()[0].pages()[0];
+                if (input.verifyPointer && completedActions.length === input.expectedActions.length) {
                   const client = await page.context().newCDPSession(page);
                   try {
                     const { root } = await client.send('DOM.getDocument', { depth: -1, pierce: true });
@@ -241,25 +268,47 @@ async function main() {
             const historyMarker = contextText.indexOf('\nRecent outcomes:');
             const context = JSON.parse(historyMarker < 0 ? contextText : contextText.slice(0, historyMarker));
             requests.push({ step: modelStep, url: context.url, elementCount: context.elements.length });
+            assert.ok(content.includes('로그인 화면을 열고 제공한 계정으로 로그인하세요.'));
+            assert.ok(content.includes('저장하거나 게시하지 마세요.'));
+            assert.equal(Number(content.match(/\nActions remaining: (\d+)/)?.[1]), input.expectedActions.length - completedActions.length);
+            assert.equal(Number(content.match(/\nCompleted actions: (\d+)/)?.[1]), completedActions.length);
             assert.equal(BrowserWindow.getAllWindows().length, 1, 'Only the main app window may exist during the tour.');
             assert.equal(globalShortcut.isRegistered('Escape'), true);
             silentControlChecks += 1;
-            const next = { action: 'finish', element_id: '', text: '', scroll_y: 0, reason: '로컬 탐방 완료' };
+            const next = { action: 'finish', element_id: '', text: '', scroll_y: 0, reason: '요청한 초안 입력을 완료했으므로 일찍 종료 제안' };
+            const select = (label, role) => {
+              const element = context.elements.find(element => (!role || element.role === role) && element.label.includes(label));
+              assert.ok(element, `The observed DOM must expose the requested ${label} control.`);
+              return element.id;
+            };
             if (modelStep === 0) {
-              assert.equal(context.loginAvailable, true);
-              next.action = 'login';
+              assert.equal(context.loginAvailable, false);
+              next.action = 'click'; next.element_id = select('로그인 화면 열기', 'button'); next.reason = '요청한 로그인 화면을 먼저 열기';
             } else if (modelStep === 1) {
-              assert.ok(context.url.endsWith('/dashboard'));
-              const link = context.elements.find(element => element.role === 'link' && element.label.includes('Open internal details'));
-              assert.ok(link, 'The current DOM must expose the internal link.');
-              next.action = 'click'; next.element_id = link.id;
+              assert.equal(context.loginAvailable, true);
+              next.action = 'login'; next.reason = '사용자가 제공한 계정으로 로그인';
             } else if (modelStep === 2) {
-              assert.ok(context.url.endsWith('/inside'));
-              const field = context.elements.find(element => element.role === 'textbox' && element.label.includes('Fixture search'));
-              assert.ok(field, 'The current DOM must expose the ordinary search field.');
-              next.action = 'type'; next.element_id = field.id; next.text = 'ordinary tour text';
+              assert.ok(context.url.endsWith('/dashboard'));
+              next.action = 'click'; next.element_id = select('게시글 작성', 'button'); next.reason = '요청한 글쓰기 화면으로 이동';
+            } else if (modelStep === 3) {
+              assert.ok(context.url.endsWith('/compose'));
+              next.action = 'type'; next.element_id = select('제목', 'textbox'); next.text = input.draft.title; next.reason = '지시한 제목 입력';
+            } else if (modelStep === 4) {
+              next.action = 'type'; next.element_id = select('본문 초안', 'textbox'); next.text = input.draft.body; next.reason = '일반 본문에 여러 줄 초안 입력';
+            } else if (modelStep === 5) {
+              next.action = 'type'; next.element_id = select('본문 편집기', 'textbox'); next.text = input.draft.editor; next.reason = '리치 텍스트 편집기에 4000자 초안 입력';
+            } else if (modelStep === 6) {
+              assert.equal(completedActions.length, 6, `Native draft entry failed: ${JSON.stringify({ nativeActionErrors: timings.nativeActionErrors, failedOperations: timings.operations.filter(operation => !operation.ok) })}`);
+              // A premature model finish is not a successful browser action.
+              // Native orchestration must continue until the chosen N is met.
+            } else if (modelStep === 7) {
+              assert.equal(completedActions.length, 6, 'The rejected finish must not consume the successful-action budget.');
+              next.action = 'click'; next.element_id = select('초안 미리보기', 'button'); next.reason = '남은 지시인 초안 미리보기 열기';
+            } else if (modelStep === 8) {
+              assert.match(context.text, /초안 미리보기를 열었습니다/);
+              next.action = 'scroll'; next.scroll_y = 500; next.reason = '설정된 남은 동작으로 미리보기 아래 화면 탐색';
             } else {
-              assert.match(context.text, /Typed: ordinary tour text/);
+              assert.fail('No further model call is allowed after all eight successful actions.');
             }
             modelStep += 1;
             return Response.json({ status: 'completed', usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 }, output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(next) }] }] });
@@ -267,13 +316,16 @@ async function main() {
         });
         timings.runMs = round(performance.now() - runStarted);
         assertNoSecrets(result);
-        assert.deepEqual(completedActions, ['login', 'click', 'type'], `Unexpected action outcomes: ${JSON.stringify({ observations: result.observations, nativeActionErrors: timings.nativeActionErrors, failedOperations: timings.operations.filter(operation => !operation.ok) })}`);
-        assert.equal(result.actionCount, 3);
+        assert.deepEqual(completedActions, input.expectedActions, `Unexpected action outcomes: ${JSON.stringify({ observations: result.observations, nativeActionErrors: timings.nativeActionErrors, failedOperations: timings.operations.filter(operation => !operation.ok) })}`);
+        assert.equal(result.actionCount, input.expectedActions.length);
         assert.equal(result.visitedCount, 3);
         assert.equal(result.pages.length, 3);
-        assert.equal(requests.length, 4);
-        assert.equal(usages.length, input.verifyRetry ? 5 : 4);
-        assert.equal(modelAttempts, input.verifyRetry ? 5 : 4);
+        assert.equal(requests.length, input.expectedActions.length + 1);
+        assert.equal(observedUrls.length, input.expectedActions.length + 1);
+        assert.equal(result.observations.filter(outcome => outcome.action === 'finish' && outcome.blocked).length, 1);
+        assert.ok(Object.values(fixtureChecks).every(Boolean), JSON.stringify(fixtureChecks));
+        assert.equal(usages.length, input.expectedActions.length + 1 + Number(input.verifyRetry));
+        assert.equal(modelAttempts, input.expectedActions.length + 1 + Number(input.verifyRetry));
         if (input.verifyRetry) assert.equal(events.filter(event => event.id === 'site-response-retry').length, 1);
         if (input.verifyReport) {
           assert.equal(reportProviderCalls, 1);
@@ -293,7 +345,7 @@ async function main() {
         assert.equal(fs.existsSync(captureDirectory) && fs.readdirSync(captureDirectory).length > 0, false, 'No capture files may be generated.');
         const diagnosticsMs = timings.diagnosticProbes.reduce((sum, item) => sum + item.durationMs, 0);
         const focusMs = focusDiagnostics.reduce((sum, item) => sum + item.durationMs, 0);
-        return { version: app.getVersion(), packaged: app.getAppPath().endsWith('app.asar'), actions: completedActions, visitedCount: result.visitedCount,
+        return { version: app.getVersion(), packaged: app.getAppPath().endsWith('app.asar'), actions: completedActions, maxActions: input.expectedActions.length, actionCount: result.actionCount, ignoredPrematureFinishes: 1, fixtureChecks, visitedCount: result.visitedCount,
           modelCalls: requests.length, modelAttempts, reportAttached: result.report?.status === 'ready', phases: [...new Set(events.filter(event => event.type === 'activity').map(event => event.phase))],
           silentControlChecks, overlayWindows: 0, pointerVerified, nativeFocusChecks: focusDiagnostics.length, browserClosed, screenshotEvents: 0, captureFiles: 0,
           timings: { ...timings, diagnosticProbeMs: round(diagnosticsMs), runExcludingDiagnosticMs: round(timings.runMs - diagnosticsMs), nativeFocusMs: round(focusMs), focusCalls: focusDiagnostics, focusImplementation: originalCreateFocus ? 'session-controller' : 'one-shot-helper' } };
@@ -302,7 +354,7 @@ async function main() {
         if (originalCreateFocus) focusModule.createManagedEdgeFocus = originalCreateFocus;
         chromium.launch = originalLaunch;
       }
-    }, { url, credentials, verifyReport: process.env.VERIFY_REPORT === '1', verifyRetry: process.env.VERIFY_RETRY === '1',
+    }, { url, credentials, draft, expectedActions, verifyReport: process.env.VERIFY_REPORT === '1', verifyRetry: process.env.VERIFY_RETRY === '1',
       verifyPointer: process.env.VERIFY_POINTER === '1', verifyForeground: process.env.VERIFY_FOREGROUND === '1', pointerScreenshot: path.join(project, 'screenshots', 'packaged-pointer-only.png') });
     if (process.env.WEBPILOT_EXECUTABLE) assert.equal(report.packaged, true);
     assert.equal(stats.loginPosts, 1);
@@ -319,7 +371,7 @@ async function main() {
   }
   const output = { passed: true, ...report, loginPosts: stats.loginPosts, cookieSessionVerified: true, paidApiCalls: 0,
     benchmark: { measuredAt: new Date().toISOString(), applicationReadyMs: Math.round(applicationReadyMs * 100) / 100, applicationCloseMs: Math.round(applicationCloseMs * 100) / 100, totalHarnessMs: Math.round((performance.now() - harnessStarted) * 100) / 100,
-      options: { report: process.env.VERIFY_REPORT === '1', retry: process.env.VERIFY_RETRY === '1', pointerScreenshot: process.env.VERIFY_POINTER === '1', foregroundProbe: process.env.VERIFY_FOREGROUND === '1' }, fixture: 'local-login-cookie-internal-click-search-type', modelNetwork: 'mocked, no API latency', samples: 1 } };
+      options: { report: process.env.VERIFY_REPORT === '1', retry: process.env.VERIFY_RETRY === '1', pointerScreenshot: process.env.VERIFY_POINTER === '1', foregroundProbe: process.env.VERIFY_FOREGROUND === '1' }, fixture: 'local-login-ui-cookie-writing-title-multiline-contenteditable-eight-actions', modelNetwork: 'mocked, no API latency', samples: 1 } };
   if (process.env.CU_BENCHMARK_LABEL) {
     const label = process.env.CU_BENCHMARK_LABEL;
     assert.match(label, /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/);
