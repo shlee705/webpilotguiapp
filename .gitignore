@@ -1,6 +1,6 @@
-node_modules/
-dist/
-release/
+/node_modules/
+/dist/
+release/**/builder-debug.yml
 test-results/
 playwright-report/
 *.tsbuildinfo

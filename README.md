@@ -1,6 +1,8 @@
 # WebPilot Desktop 0.4.1
 
-이 저장소는 성능 개선 전 **0.4.1** 프로젝트입니다. 전체 소스, 개발 설정, 테스트, 앱 아이콘과 원본 `testReport/report.pdf`를 포함합니다. 실행파일과 빌드 결과를 포함한 전체 프로젝트 ZIP은 [v0.4.1 릴리스](https://github.com/shlee705/webpilotguiapp/releases/tag/v0.4.1)에서 받을 수 있습니다. 실행기록과 재설치 가능한 개발 의존성(`node_modules`)은 제외했습니다.
+이 저장소는 성능 개선 전 **0.4.1** 프로젝트입니다. 전체 소스, 개발 설정, 테스트, 앱 아이콘, 원본 `testReport/report.pdf`와 `release/0.4.1/win-unpacked` 실행 폴더 전체를 포함합니다. 실행파일과 런타임은 Git LFS로 관리합니다. 실행파일과 빌드 결과를 포함한 전체 프로젝트 ZIP은 [v0.4.1 릴리스](https://github.com/shlee705/webpilotguiapp/releases/tag/v0.4.1)에서도 받을 수 있습니다. 실행기록과 재설치 가능한 개발 의존성(프로젝트 루트의 `node_modules`)은 제외했습니다.
+
+Git으로 받을 때는 Git LFS가 설치된 환경에서 저장소를 복제한 뒤 `git lfs pull`을 실행하세요. GitHub의 일반 **Download ZIP** 대신 위 릴리스의 `WebPilot-0.4.1-full-project.zip`을 받으면 실행에 필요한 실제 파일 전체가 포함됩니다.
 
 소스만 받은 경우 `npm ci` 후 `npm run desktop`으로 실행하거나 `npm run package`로 Windows 실행파일을 만들 수 있습니다.
 
