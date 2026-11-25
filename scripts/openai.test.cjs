@@ -201,6 +201,24 @@ test('site loop accounts each API request once and emits cumulative usage', asyn
   assert.equal(settings.get().usage.untrackedRequests, 1);
 });
 
+test('site runs forward only the current task while still validating all supplied message roles', async () => {
+  const received = [];
+  const fixture = serviceFixture(async () => assert.fail('No normal chat endpoint expected'), {
+    siteAgent: async options => { received.push(options.messages); },
+  });
+  const task = { role: 'user', content: 'https://example.com 새 요청의 메뉴를 확인해 줘' };
+  const input = { ...request(), targetUrl: 'https://example.com/', messages: [
+    { role: 'user', content: '이전 요청' },
+    { role: 'assistant', content: '이전 작업의 상세 기록입니다. '.repeat(1000) },
+    task,
+  ] };
+  assert.equal((await fixture.service.start(input, () => {})).ok, true);
+  assert.deepEqual(received, [[task]]);
+  const invalid = { ...input, messages: [{ role: 'developer', content: 'untrusted override' }, task] };
+  assert.equal((await fixture.service.start(invalid, () => {})).ok, false);
+  assert.equal(received.length, 1);
+});
+
 test('per-run action limit is validated before work and forwarded without coercion', async () => {
   const runs = [];
   const { service, settings } = serviceFixture(async () => assert.fail('No normal API request expected'), {

@@ -1,8 +1,9 @@
-param([Parameter(Mandatory=$true)][ValidateRange(1,2147483647)][int]$BrowserProcessId)
+param([Parameter(Mandatory=$true)][ValidateRange(1,2147483647)][int]$BrowserProcessId, [switch]$Persistent)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $edgeProcess = Get-Process -Id $BrowserProcessId -ErrorAction Stop
 if ($edgeProcess.ProcessName -ne 'msedge') { throw 'Only the managed Microsoft Edge process may be focused.' }
+$browserStarted = $edgeProcess.StartTime.Ticks
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -52,4 +53,18 @@ public static class WebPilotEdgeFocus {
   }
 }
 '@
-@{ ok = [WebPilotEdgeFocus]::Focus([uint32]$BrowserProcessId) } | ConvertTo-Json -Compress
+if ($Persistent) {
+  # A session compiles the native focus helper once. Input is a fixed command,
+  # never a PID, expression, URL or user-supplied PowerShell code.
+  [Console]::Out.WriteLine('{"ready":true}')
+  [Console]::Out.Flush()
+  while ($null -ne ($focusCommand = [Console]::In.ReadLine())) {
+    if ($focusCommand -ne 'focus') { break }
+    $edgeProcess = Get-Process -Id $BrowserProcessId -ErrorAction Stop
+    if ($edgeProcess.ProcessName -ne 'msedge' -or $edgeProcess.StartTime.Ticks -ne $browserStarted) { break }
+    [Console]::Out.WriteLine((@{ ok = [WebPilotEdgeFocus]::Focus([uint32]$BrowserProcessId) } | ConvertTo-Json -Compress))
+    [Console]::Out.Flush()
+  }
+} else {
+  @{ ok = [WebPilotEdgeFocus]::Focus([uint32]$BrowserProcessId) } | ConvertTo-Json -Compress
+}

@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { runSiteAgent, readAction } = require('../electron/site-agent.cjs');
+const { runSiteAgent, readAction, sanitizeContext } = require('../electron/site-agent.cjs');
 const { validateCredentials, createSecretRedactor } = require('../electron/login-secrets.cjs');
 
 const action = (name, extra = {}) => ({ action: name, element_id: name === 'click' ? 'e1' : name === 'type' ? 'e2' : '', text: '', scroll_y: 0, reason: '다음 동작', ...extra });
@@ -39,6 +39,7 @@ test('DOM tour sends text context, uses observed element IDs and never collects 
   assert.equal(h.events.some(event => event.type === 'screenshot'), false);
   assert.equal(h.requests[0].store, false);
   assert.equal(h.requests[0].max_output_tokens, 1024);
+  assert.deepEqual(h.requests[0].reasoning, { effort: 'low' });
   assert.equal(h.requests[0].text.format.strict, true);
   assert.equal(h.usages.length, 2);
   assert.equal(result.visitedCount, 2);
@@ -46,6 +47,51 @@ test('DOM tour sends text context, uses observed element IDs and never collects 
   assert.equal(result.captures, undefined);
   assert.equal(h.events.at(-1).phase, 'complete');
   assert.equal(h.closed(), true);
+});
+
+test('compact DOM context retains all observed IDs, login gating and external origins', () => {
+  const credentials = { username: 'private-user', password: 'private-pass&9' };
+  const redact = createSecretRedactor(credentials);
+  const raw = {
+    url: 'https://example.com/catalog', title: 'Catalog', text: 'Product   details\n'.repeat(800),
+    elements: Array.from({ length: 120 }, (_, index) => ({
+      id: `e${index}`, role: 'link', type: 'a', label: `Item ${index} ${credentials.password}   `,
+      href: `https://example.com/item/${index}?tracking=${'x'.repeat(3000)}`,
+    })), loginAvailable: true,
+  };
+  raw.elements[0].href = 'https://example.com/search?q=available&sort=price';
+  raw.elements[1].href = 'https://external.example/private?account=' + encodeURIComponent(credentials.username);
+  const context = sanitizeContext(raw, redact, true);
+  assert.deepEqual(context.elements.map(element => element.id), raw.elements.map(element => element.id));
+  assert.equal(context.elements[0].href, '/search?q=available&sort=price');
+  assert.ok(context.elements[1].href.startsWith('https://external.example/'));
+  assert.equal(context.loginAvailable, true);
+  assert.equal(sanitizeContext(raw, redact, false).loginAvailable, false);
+  assert.ok(context.text.length <= 8000);
+  assert.ok(context.elements.every(element => element.href.length <= 512));
+  const serialized = JSON.stringify(context);
+  assert.equal(serialized.includes(credentials.password), false);
+  assert.equal(serialized.includes(credentials.username), false);
+  assert.ok(serialized.length < JSON.stringify(raw).length / 4, 'Large DOM hints should be bounded without dropping actionable IDs.');
+});
+
+test('only the documented Luna model uses low reasoning and stable page prefixes precede changing outcomes', async () => {
+  const h = harness([action('click'), action('finish')]);
+  const factory = h.options.sessionFactory;
+  h.options.sessionFactory = async options => {
+    const session = await factory(options);
+    const context = await session.observe();
+    session.observe = async () => context;
+    return session;
+  };
+  await runSiteAgent(h.options);
+  const inputs = h.requests.map(request => request.input[1].content);
+  assert.equal(inputs[0].split('\nRecent outcomes:')[0], inputs[1].split('\nRecent outcomes:')[0]);
+  assert.notEqual(inputs[0], inputs[1]);
+  assert.deepEqual(h.requests[0].reasoning, { effort: 'low' });
+  const custom = harness([action('finish')], { model: 'custom-model' });
+  await runSiteAgent(custom.options);
+  assert.equal(Object.hasOwn(custom.requests[0], 'reasoning'), false);
 });
 
 test('configured action bound limits DOM observations and API calls', async () => {
@@ -184,7 +230,7 @@ test('more than five actions run and model history remains bounded during a long
   assert.equal(result.actionCount, 30);
   assert.equal(result.pages.length, 31);
   const input = h.requests.at(-1).input[1].content;
-  const recent = JSON.parse(input.split('Recent outcomes: ')[1].split('\nCurrent page:')[0]);
+  const recent = JSON.parse(input.split('Recent outcomes: ')[1].split('\nActions remaining:')[0]);
   assert.equal(recent.length, 12);
   assert.ok(input.length < 25000);
   const huge = harness([], { maxActions: Number.MAX_SAFE_INTEGER });

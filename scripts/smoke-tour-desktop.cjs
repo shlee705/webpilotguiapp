@@ -6,9 +6,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const { performance } = require('node:perf_hooks');
 const { _electron } = require('playwright');
 
 async function main() {
+  const harnessStarted = performance.now();
   const project = path.resolve(__dirname, '..');
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'webpilot-dom-tour-'));
   const credentials = { username: 'tour-fixture-user', password: 'tour-fixture-password' };
@@ -47,6 +49,9 @@ async function main() {
   await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${fixture.address().port}/`;
   let desktop;
+  let report;
+  let applicationReadyMs;
+  let applicationCloseMs;
   try {
     const environment = { ...process.env, ELECTRON_DEV: '0' };
     delete environment.ELECTRON_RUN_AS_NODE;
@@ -56,33 +61,57 @@ async function main() {
     });
     const window = await desktop.firstWindow();
     await window.waitForSelector('#root > *');
+    applicationReadyMs = performance.now() - harnessStarted;
     const actualProfile = await desktop.evaluate(({ app }) => app.getPath('userData'));
     assert.equal(path.resolve(actualProfile).toLowerCase(), path.resolve(profile).toLowerCase(), 'Only the isolated test profile may be used.');
-    const report = await desktop.evaluate(async ({ app, BrowserWindow, globalShortcut }, input) => {
+    report = await desktop.evaluate(async ({ app, BrowserWindow, globalShortcut }, input) => {
       const require = process.getBuiltinModule('module').createRequire(`${app.getAppPath()}/package.json`);
       const assert = require('node:assert/strict');
       const fs = require('node:fs');
       const path = require('node:path');
-      const { execFile, execFileSync } = require('node:child_process');
+      const { execFileSync } = require('node:child_process');
+      const { performance } = require('node:perf_hooks');
       const focusModule = require(path.join(app.getAppPath(), 'electron', 'focus-edge.cjs'));
       const originalFocus = focusModule.focusManagedEdge;
+      const originalCreateFocus = focusModule.createManagedEdgeFocus;
       const focusDiagnostics = [];
-      focusModule.focusManagedEdge = async browserPid => {
-        const record = { browserPid, ok: false };
+      const timings = { operations: [], diagnosticProbes: [], nativeActionErrors: [], foregroundVerified: false, runMs: 0 };
+      const clockStart = performance.now();
+      const round = value => Math.round(value * 100) / 100;
+      const probeForeground = () => {
+        const started = performance.now();
+        try {
+          const command = '[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -TypeDefinition \'using System; using System.Runtime.InteropServices; public class FocusProbe { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p); }\'; $activeProcessId=[uint32]0; [void][FocusProbe]::GetWindowThreadProcessId([FocusProbe]::GetForegroundWindow(),[ref]$activeProcessId); @{pid=$activeProcessId;process=(Get-Process -Id $activeProcessId).ProcessName} | ConvertTo-Json -Compress';
+          return JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, shell: false, encoding: 'utf8', timeout: 8000 }).trim());
+        } finally { timings.diagnosticProbes.push({ kind: 'foreground-pid', durationMs: round(performance.now() - started) }); }
+      };
+      const measureFocus = async (browserPid, operation) => {
+        const started = performance.now();
+        const record = { browserPid, ok: false, startMs: round(started - clockStart), durationMs: 0 };
         focusDiagnostics.push(record);
         try {
-          const result = await originalFocus(browserPid, { execute: (file, args, options, callback) => execFile(file, args, options, (error, stdout, stderr) => {
-            record.helperResult = stdout.trim(); callback(error, stdout, stderr);
-          }) });
+          // Do not inject an execute implementation: it can bypass the real
+          // persistent-helper optimization that this benchmark must measure.
+          const result = await operation();
           record.ok = true;
           return result;
         } catch (error) {
-          try {
-            const command = '[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -TypeDefinition \'using System; using System.Runtime.InteropServices; public class FocusProbe { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p); }\'; $activeProcessId=[uint32]0; [void][FocusProbe]::GetWindowThreadProcessId([FocusProbe]::GetForegroundWindow(),[ref]$activeProcessId); @{pid=$activeProcessId;process=(Get-Process -Id $activeProcessId).ProcessName} | ConvertTo-Json -Compress';
-            record.foreground = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, shell: false, encoding: 'utf8', timeout: 8000 }).trim());
-          } catch { record.foreground = { unavailable: true }; }
+          try { record.foreground = probeForeground(); } catch { record.foreground = { unavailable: true }; }
           throw new Error(`${error.message} Native focus diagnostic: ${JSON.stringify(focusDiagnostics)}`);
-        }
+        } finally { record.durationMs = round(performance.now() - started); }
+      };
+      focusModule.focusManagedEdge = browserPid => measureFocus(browserPid, () => originalFocus(browserPid));
+      if (originalCreateFocus) focusModule.createManagedEdgeFocus = (...args) => {
+        const control = originalCreateFocus(...args);
+        const focus = control.focus.bind(control);
+        return { ...control, focus: (...focusArgs) => measureFocus(args[0], () => focus(...focusArgs)) };
+      };
+      const measure = async (kind, detail, operation) => {
+        const started = performance.now();
+        const focusIndex = focusDiagnostics.length;
+        let ok = false;
+        try { const result = await operation(); ok = true; return result; }
+        finally { timings.operations.push({ kind, detail, ok, startMs: round(started - clockStart), durationMs: round(performance.now() - started), focusCalls: focusDiagnostics.length - focusIndex, focusMs: round(focusDiagnostics.slice(focusIndex).reduce((sum, entry) => sum + entry.durationMs, 0)) }); }
       };
       const { runSiteAgent } = require(path.join(app.getAppPath(), 'electron', 'site-agent.cjs'));
       const { attachReport, getReport } = require(path.join(app.getAppPath(), 'electron', 'reports.cjs'));
@@ -120,6 +149,7 @@ async function main() {
         assert.deepEqual(await overlay.begin('concurrent-fixture'), { ok: true });
         assert.deepEqual(overlay.end('concurrent-fixture'), { ok: true });
         assert.equal(globalShortcut.isRegistered('Escape'), true, 'Finishing one session must preserve Escape for another.');
+        const runStarted = performance.now();
         const result = await runSiteAgent({
           apiKey: 'fixture-key-never-sent-to-network', model: 'gpt-6-luna', targetUrl: input.url,
           messages: [{ role: 'user', content: `로그인 후 내부 페이지로 이동해서 검색란에 ordinary tour text를 입력해 주세요. 계정 ${input.credentials.username}, 비밀번호 ${input.credentials.password}` }],
@@ -129,7 +159,7 @@ async function main() {
             assert.equal(signal, controller.signal);
             assert.equal(browserClosed, true);
             reportProviderCalls += 1;
-            return attachReport({ signal });
+            return measure('attach-report', 'existing-pdf', () => attachReport({ signal }));
           } } : {}),
           onUsage: usage => usages.push(usage),
           onEvent: event => {
@@ -143,13 +173,34 @@ async function main() {
           },
           sessionFactory: async options => {
             assert.deepEqual(options.credentials, input.credentials);
-            const session = await startSiteSession(options);
+            const session = await measure('start-session', 'isolated-edge', () => startSiteSession(options));
+            if (session.perform) {
+              const perform = session.perform.bind(session);
+              session.perform = async (...args) => {
+                try { return await perform(...args); }
+                catch (error) {
+                  let message = String(error.message ?? error);
+                  for (const secret of [input.credentials.username, input.credentials.password, encodeURIComponent(input.credentials.username), encodeURIComponent(input.credentials.password)]) message = message.split(secret).join('[redacted]');
+                  timings.nativeActionErrors.push({ name: error.name, action: args[0]?.type, message });
+                  throw error;
+                }
+              };
+            }
             return {
-              observe: async () => { const context = await session.observe(); assertNoSecrets(context); observedUrls.push(context.url); return context; },
+              observe: async () => {
+                const context = await measure('observe', String(observedUrls.length + 1), () => session.observe());
+                assertNoSecrets(context); observedUrls.push(context.url); return context;
+              },
               act: async action => {
                 assertNoSecrets(action);
-                const result = await session.act(action);
+                const result = await measure('act', action.action, () => session.act(action));
                 completedActions.push(action.action);
+                if (input.verifyForeground && action.action === 'type') {
+                  const foreground = probeForeground();
+                  timings.finalForeground = foreground;
+                  assert.equal(foreground.pid, focusDiagnostics.at(-1).browserPid, `Actual OS foreground must be the owned Edge process: ${JSON.stringify(foreground)}`);
+                  timings.foregroundVerified = true;
+                }
                 if (input.verifyPointer && action.action === 'type') {
                   const page = managedBrowser.contexts()[0].pages()[0];
                   const client = await page.context().newCDPSession(page);
@@ -170,11 +221,11 @@ async function main() {
                 }
                 return result;
               },
-              close: async () => { await session.close(); browserClosed = true; },
+              close: async () => { await measure('close-session', 'isolated-edge', () => session.close()); browserClosed = true; },
               capture: async () => assert.fail('The DOM tour must never capture a screenshot.'),
             };
           },
-          fetchImpl: async (endpoint, options) => {
+          fetchImpl: async (endpoint, options) => measure('mock-model', String(modelAttempts + 1), async () => {
             assert.equal(endpoint, 'https://api.openai.com/v1/responses');
             const body = JSON.parse(options.body);
             assertNoSecrets(body);
@@ -186,7 +237,9 @@ async function main() {
             const content = body.input[1].content;
             assert.equal(typeof content, 'string');
             const marker = '\nCurrent page: ';
-            const context = JSON.parse(content.slice(content.lastIndexOf(marker) + marker.length));
+            const contextText = content.slice(content.lastIndexOf(marker) + marker.length);
+            const historyMarker = contextText.indexOf('\nRecent outcomes:');
+            const context = JSON.parse(historyMarker < 0 ? contextText : contextText.slice(0, historyMarker));
             requests.push({ step: modelStep, url: context.url, elementCount: context.elements.length });
             assert.equal(BrowserWindow.getAllWindows().length, 1, 'Only the main app window may exist during the tour.');
             assert.equal(globalShortcut.isRegistered('Escape'), true);
@@ -210,10 +263,11 @@ async function main() {
             }
             modelStep += 1;
             return Response.json({ status: 'completed', usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 }, output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(next) }] }] });
-          },
+          }),
         });
+        timings.runMs = round(performance.now() - runStarted);
         assertNoSecrets(result);
-        assert.deepEqual(completedActions, ['login', 'click', 'type']);
+        assert.deepEqual(completedActions, ['login', 'click', 'type'], `Unexpected action outcomes: ${JSON.stringify({ observations: result.observations, nativeActionErrors: timings.nativeActionErrors, failedOperations: timings.operations.filter(operation => !operation.ok) })}`);
         assert.equal(result.actionCount, 3);
         assert.equal(result.visitedCount, 3);
         assert.equal(result.pages.length, 3);
@@ -237,24 +291,45 @@ async function main() {
         assert.ok(focusDiagnostics.length > 0 && focusDiagnostics.every(record => record.ok));
         const captureDirectory = path.join(app.getPath('userData'), 'captures');
         assert.equal(fs.existsSync(captureDirectory) && fs.readdirSync(captureDirectory).length > 0, false, 'No capture files may be generated.');
-        return { packaged: app.getAppPath().endsWith('app.asar'), actions: completedActions, visitedCount: result.visitedCount,
+        const diagnosticsMs = timings.diagnosticProbes.reduce((sum, item) => sum + item.durationMs, 0);
+        const focusMs = focusDiagnostics.reduce((sum, item) => sum + item.durationMs, 0);
+        return { version: app.getVersion(), packaged: app.getAppPath().endsWith('app.asar'), actions: completedActions, visitedCount: result.visitedCount,
           modelCalls: requests.length, modelAttempts, reportAttached: result.report?.status === 'ready', phases: [...new Set(events.filter(event => event.type === 'activity').map(event => event.phase))],
-          silentControlChecks, overlayWindows: 0, pointerVerified, nativeFocusChecks: focusDiagnostics.length, browserClosed, screenshotEvents: 0, captureFiles: 0 };
-      } finally { controller.abort(); overlay.dispose(); focusModule.focusManagedEdge = originalFocus; chromium.launch = originalLaunch; }
+          silentControlChecks, overlayWindows: 0, pointerVerified, nativeFocusChecks: focusDiagnostics.length, browserClosed, screenshotEvents: 0, captureFiles: 0,
+          timings: { ...timings, diagnosticProbeMs: round(diagnosticsMs), runExcludingDiagnosticMs: round(timings.runMs - diagnosticsMs), nativeFocusMs: round(focusMs), focusCalls: focusDiagnostics, focusImplementation: originalCreateFocus ? 'session-controller' : 'one-shot-helper' } };
+      } finally {
+        controller.abort(); overlay.dispose(); focusModule.focusManagedEdge = originalFocus;
+        if (originalCreateFocus) focusModule.createManagedEdgeFocus = originalCreateFocus;
+        chromium.launch = originalLaunch;
+      }
     }, { url, credentials, verifyReport: process.env.VERIFY_REPORT === '1', verifyRetry: process.env.VERIFY_RETRY === '1',
-      verifyPointer: process.env.VERIFY_POINTER === '1', pointerScreenshot: path.join(project, 'screenshots', 'packaged-pointer-only.png') });
+      verifyPointer: process.env.VERIFY_POINTER === '1', verifyForeground: process.env.VERIFY_FOREGROUND === '1', pointerScreenshot: path.join(project, 'screenshots', 'packaged-pointer-only.png') });
     if (process.env.WEBPILOT_EXECUTABLE) assert.equal(report.packaged, true);
     assert.equal(stats.loginPosts, 1);
     assert.equal(stats.unexpectedPosts, 0);
     assert.equal(stats.acceptedCredentials, true);
     assert.ok(stats.authenticatedPages >= 1);
     assert.ok(stats.authenticatedDetails >= 1);
-    console.log(JSON.stringify({ passed: true, ...report, loginPosts: stats.loginPosts, cookieSessionVerified: true, paidApiCalls: 0 }));
   } finally {
+    const closingAt = performance.now();
     await desktop?.close();
+    applicationCloseMs = performance.now() - closingAt;
     fixture.closeAllConnections();
     await new Promise(resolve => fixture.close(resolve));
   }
+  const output = { passed: true, ...report, loginPosts: stats.loginPosts, cookieSessionVerified: true, paidApiCalls: 0,
+    benchmark: { measuredAt: new Date().toISOString(), applicationReadyMs: Math.round(applicationReadyMs * 100) / 100, applicationCloseMs: Math.round(applicationCloseMs * 100) / 100, totalHarnessMs: Math.round((performance.now() - harnessStarted) * 100) / 100,
+      options: { report: process.env.VERIFY_REPORT === '1', retry: process.env.VERIFY_RETRY === '1', pointerScreenshot: process.env.VERIFY_POINTER === '1', foregroundProbe: process.env.VERIFY_FOREGROUND === '1' }, fixture: 'local-login-cookie-internal-click-search-type', modelNetwork: 'mocked, no API latency', samples: 1 } };
+  if (process.env.CU_BENCHMARK_LABEL) {
+    const label = process.env.CU_BENCHMARK_LABEL;
+    assert.match(label, /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/);
+    const directory = path.join(project, 'artifacts');
+    fs.mkdirSync(directory, { recursive: true });
+    const artifact = path.join(directory, `cu-timing-${label}.json`);
+    fs.writeFileSync(artifact, JSON.stringify(output, null, 2) + '\n');
+    output.benchmark.artifact = artifact;
+  }
+  console.log(JSON.stringify(output));
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

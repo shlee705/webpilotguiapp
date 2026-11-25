@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { validateTargetUrl, validateAction, validateDomAction, matchesLoginRequest, requestPolicy, VIEWPORT } = require('../electron/site-browser.cjs');
+const { validateTargetUrl, validateAction, validateDomAction, matchesLoginRequest, requestPolicy, VIEWPORT, waitForPageReady, typingDelay, readWithNavigationRecovery, SitePolicyError } = require('../electron/site-browser.cjs');
 
 test('site URL policy permits HTTP(S) only, without embedded credentials or mutating paths', () => {
   assert.equal(validateTargetUrl('http://localhost:8000/path').origin, 'http://localhost:8000');
@@ -76,4 +76,111 @@ test('SPA login permits one same-origin auth endpoint and exact flat credential 
   ]) assert.equal(matchesLoginRequest({ ...request, ...override }, permit, credentials, 1000), false);
   assert.equal(matchesLoginRequest(request, { ...permit, used: true }, credentials, 1000), false);
   assert.equal(matchesLoginRequest(request, permit, credentials, 2001), false);
+});
+
+test('an already stable page proceeds immediately without a fixed post-action delay', async () => {
+  let waits = 0;
+  assert.equal(await waitForPageReady({ read: async () => ({ ready: true, pending: false, busy: false, quietForMs: 200 }),
+    now: () => 0, wait: async () => { waits += 1; } }), true);
+  assert.equal(waits, 0);
+});
+
+test('SPA content waits for its request and resulting DOM updates, then proceeds', async () => {
+  let elapsed = 0;
+  const ready = await waitForPageReady({ now: () => elapsed, wait: async ms => { elapsed += ms; },
+    read: async () => ({ ready: true, pending: elapsed < 900, busy: elapsed < 900, quietForMs: Math.max(0, elapsed - 950) }) });
+  assert.equal(ready, true);
+  assert.ok(elapsed >= 1040 && elapsed < 1100);
+});
+
+test('continuous animation and long polling have bounded waits', async () => {
+  for (const [pending, busy, bound] of [[false, false, 180], [true, false, 1500], [true, true, 3000]]) {
+    let elapsed = 0;
+    assert.equal(await waitForPageReady({ now: () => elapsed, wait: async ms => { elapsed += ms; },
+      read: async () => ({ ready: true, pending, busy, quietForMs: 0 }) }), false);
+    assert.equal(elapsed, bound);
+  }
+});
+
+test('debounced input can start a delayed request without delaying immediate DOM updates', async () => {
+  let elapsed = 0;
+  const options = { expectChange: true, now: () => elapsed, wait: async ms => { elapsed += ms; } };
+  assert.equal(await waitForPageReady({ ...options,
+    read: async () => ({ ready: true, pending: elapsed >= 300 && elapsed < 700, busy: false, changed: elapsed >= 700, quietForMs: elapsed < 700 ? 1000 : elapsed - 700 }) }), true);
+  assert.ok(elapsed >= 790 && elapsed <= 850);
+  elapsed = 0;
+  assert.equal(await waitForPageReady({ ...options,
+    read: async () => ({ ready: true, pending: false, busy: false, changed: true, quietForMs: 100 }) }), true);
+  assert.equal(elapsed, 0);
+});
+
+test('page readiness observation stops immediately on cancellation', async () => {
+  const controller = new AbortController();
+  let reads = 0;
+  await assert.rejects(waitForPageReady({ signal: controller.signal, now: () => 0,
+    read: async () => { reads += 1; return { ready: true, pending: true, busy: false, quietForMs: 0 }; },
+    wait: async () => controller.abort(),
+  }), { name: 'AbortError' });
+  assert.equal(reads, 1);
+});
+
+test('typing retains per-key events with at most 120ms intentional pacing per field', () => {
+  for (const length of [1, 20, 60, 200, 320, 1024]) {
+    const delay = typingDelay(length);
+    assert.ok(Number.isInteger(delay) && delay >= 0 && delay <= 6);
+    assert.ok(length * delay <= 120);
+  }
+});
+
+test('readiness reads recover across delayed document replacement without repeating an action', async () => {
+  let reads = 0, recoveries = 0, documentReady = false, checks = 0;
+  const result = await readWithNavigationRecovery({
+    read: async () => {
+      reads += 1;
+      if (!documentReady) throw new Error('page.evaluate: Execution context was destroyed, most likely because of a navigation');
+      return { ready: true, url: 'https://example.com/inside' };
+    },
+    recover: async () => { recoveries += 1; await new Promise(resolve => setImmediate(resolve)); documentReady = true; },
+    assertActive: () => { checks += 1; },
+  });
+  assert.deepEqual(result, { ready: true, url: 'https://example.com/inside' });
+  assert.equal(reads, 2); assert.equal(recoveries, 1); assert.ok(checks >= 3);
+});
+
+test('navigation-context recovery attempts at most three reads', async () => {
+  let reads = 0, recoveries = 0;
+  const failure = new Error('Protocol error (Runtime.callFunctionOn): Cannot find context with specified id');
+  await assert.rejects(readWithNavigationRecovery({
+    read: async () => { reads += 1; throw failure; },
+    recover: async () => { recoveries += 1; },
+  }), error => error === failure);
+  assert.equal(reads, 3); assert.equal(recoveries, 2);
+});
+
+test('cancelling during document recovery prevents another read', async () => {
+  const controller = new AbortController();
+  let reads = 0;
+  await assert.rejects(readWithNavigationRecovery({ signal: controller.signal,
+    read: async () => { reads += 1; throw new Error('Execution context was destroyed'); },
+    recover: async () => { await new Promise(resolve => setImmediate(resolve)); controller.abort(); },
+  }), { name: 'AbortError' });
+  assert.equal(reads, 1);
+});
+
+test('document recovery never bypasses origin policy or retries unrelated failures', async () => {
+  let reads = 0, recoveries = 0, allowed = true;
+  await assert.rejects(readWithNavigationRecovery({
+    assertActive: () => { if (!allowed) throw new SitePolicyError('허용된 사이트 범위를 벗어났습니다.'); },
+    read: async () => { reads += 1; throw new Error('Execution context was destroyed'); },
+    recover: async () => { recoveries += 1; allowed = false; },
+  }), SitePolicyError);
+  assert.equal(reads, 1); assert.equal(recoveries, 1);
+  for (const failure of [new Error('Target page, context or browser has been closed'), new Error('Read failed'), new SitePolicyError('Execution context was destroyed')]) {
+    let attempts = 0;
+    await assert.rejects(readWithNavigationRecovery({
+      read: async () => { attempts += 1; throw failure; },
+      recover: async () => assert.fail('Unrelated failures must not be retried'),
+    }), error => error === failure);
+    assert.equal(attempts, 1);
+  }
 });

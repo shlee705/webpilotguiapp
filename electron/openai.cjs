@@ -156,6 +156,13 @@ function createOpenAiService({ settings, fetchImpl = fetch, now = () => new Date
       credentials = validateCredentials(input.credentials);
       redact = createSecretRedactor(credentials);
       messages = requestMessages(input.messages);
+      if (typeof input.targetUrl === 'string' && input.targetUrl) {
+        // The site loop uses only the latest user task. Do not repeatedly scrub
+        // or retain old assistant summaries that cannot affect that request.
+        const task = messages.findLast(message => message.role === 'user');
+        if (!task) throw new Error('사이트 버그 탐색 요청을 입력해 주세요.');
+        messages = [messages[0], task];
+      }
       messages = messages.map((message, index) => index === 0 ? message : { ...message, content: redact(message.content) });
       maxActions = validateMaxActions(input.maxActions);
       if (credentials && !(typeof input.targetUrl === 'string' && input.targetUrl)) throw new Error('로그인 정보는 사이트 버그 탐색 요청에서만 사용할 수 있습니다.');

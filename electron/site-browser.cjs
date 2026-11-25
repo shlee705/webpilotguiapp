@@ -2,7 +2,8 @@
 
 const { chromium } = require('playwright-core');
 const { randomUUID } = require('node:crypto');
-const { focusManagedEdge } = require('./focus-edge.cjs');
+const { setTimeout: sleep } = require('node:timers/promises');
+const { createManagedEdgeFocus } = require('./focus-edge.cjs');
 const { validateCredentials, createSecretRedactor } = require('./login-secrets.cjs');
 
 const VIEWPORT = Object.freeze({ width: 1280, height: 800 });
@@ -12,6 +13,47 @@ const SENSITIVE_INPUT = /(?:password|passwd|\bpwd\b|secret|token|api[\s_-]*key|c
 const LOGIN_LABEL = /(?:log\s*in|sign[\s_-]*in|로그인)/i;
 const LOGIN_DANGER = /(?:register|registration|sign[\s_-]*up|create[\s_-]*account|reset|forgot|change[\s_-]*password|checkout|payment|purchase|delete|회원\s*가입|가입|비밀번호\s*(?:변경|찾기|재설정)|결제|구매|삭제)/i;
 const AUTH_PATH = /(?:^|\/)(?:login|signin|sign-in|authenticate|auth|session)(?:\/|$)/i;
+
+function typingDelay(length) { return Math.min(6, Math.floor(120 / Math.max(1, length))); }
+
+async function readWithNavigationRecovery({ read, recover, assertActive = () => {}, signal }) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    signal?.throwIfAborted();
+    assertActive();
+    try { return await read(); }
+    catch (error) {
+      signal?.throwIfAborted();
+      const lostContext = error.name !== 'SitePolicyError'
+        && /execution context was destroyed|cannot find context with (?:specified )?id|execution context is not available in detached frame/i.test(error.message ?? '');
+      if (!lostContext || attempt === 2) throw error;
+      // Only repeat observation of the newly committed document. The input or
+      // click that triggered navigation has already happened and is not retried.
+      await recover();
+      signal?.throwIfAborted();
+      assertActive();
+    }
+  }
+}
+
+async function waitForPageReady({ read, signal, expectChange = false, now = Date.now, wait = milliseconds => sleep(milliseconds, undefined, { signal }) }) {
+  const started = now();
+  let idleSince;
+  while (true) {
+    signal?.throwIfAborted();
+    const state = await read();
+    signal?.throwIfAborted();
+    const elapsed = now() - started;
+    const responseObserved = !expectChange || state.changed || elapsed >= 350;
+    if (state.ready && !state.pending && !state.busy && state.quietForMs >= 90 && responseObserved) return true;
+    if (state.pending || state.busy || !state.ready) idleSince = undefined;
+    else idleSince ??= now();
+    // Never wait indefinitely on polling requests, timers or animated content.
+    const limit = state.busy ? 3000 : state.pending || !state.ready ? 1500 : responseObserved ? 180 : 350;
+    const spent = idleSince === undefined ? elapsed : now() - idleSince;
+    if (spent >= limit) return false;
+    await wait(Math.min(30, limit - spent));
+  }
+}
 
 function validateDomAction(action) {
   if (!action || typeof action !== 'object' || Array.isArray(action)) throw new SitePolicyError('허용된 사이트 동작이 아닙니다.');
@@ -101,6 +143,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
   let windowSession;
   let browserWindowId;
   let browserPid;
+  let focusController;
   let capturedViewport;
   let closed = false;
   let closePromise;
@@ -111,6 +154,10 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
   let loginAttempted = false;
   let privateInputStarted = false;
   let loginInputInProgress = false;
+  let readinessDirty = true;
+  let expectPageChange = false;
+  let activitySince = Date.now();
+  const activeRequests = new Map();
   const elementSnapshot = new Map();
   const status = label => { try { onStatus(redact(label)); } catch { /* Observers cannot widen session privileges. */ } };
   const blocked = reason => { lastBlocked = reason; status(`차단: ${reason}`); };
@@ -124,6 +171,8 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
     closed = true;
     loginPermit = undefined;
     elementSnapshot.clear();
+    activeRequests.clear();
+    focusController?.close();
     signal?.removeEventListener('abort', onAbort);
     closePromise = (async () => {
       await context?.close().catch(() => {});
@@ -141,6 +190,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       const { processInfo } = await browserSession.send('SystemInfo.getProcessInfo');
       browserPid = processInfo.find(info => info.type === 'browser')?.id;
       await browserSession.detach();
+      focusController = createManagedEdgeFocus(browserPid);
     }
     if (signal?.aborted) { await close(); signal.throwIfAborted(); }
     context = await browser.newContext({ viewport: null, serviceWorkers: 'block', acceptDownloads: false, permissions: [] });
@@ -151,6 +201,15 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       blocked('새 창 또는 새 탭 열기');
       void candidate.close().catch(() => {});
     });
+    context.on('request', request => {
+      try {
+        if (request.frame() === page?.mainFrame() && ['document', 'script', 'xhr', 'fetch'].includes(request.resourceType())) {
+          activeRequests.set(request, Date.now());
+        }
+      } catch { /* Worker and unrelated page requests do not delay observation. */ }
+    });
+    context.on('requestfinished', request => activeRequests.delete(request));
+    context.on('requestfailed', request => activeRequests.delete(request));
     await context.route('**/*', async route => {
       const request = route.request();
       let ownedPage = false;
@@ -244,6 +303,23 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       }
     });
     await context.addInitScript(() => {
+      let changedAt = Date.now();
+      const ignored = node => {
+        const element = node instanceof Element ? node : node.parentElement;
+        return Boolean(element?.closest('time,[role="timer"],[data-clock],[data-webpilot-visual-pointer]'));
+      };
+      const observer = new MutationObserver(records => {
+        if (records.some(record => !ignored(record.target) && (record.type !== 'childList'
+          || [...record.addedNodes, ...record.removedNodes].some(node => !ignored(node))))) changedAt = Date.now();
+      });
+      observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['aria-busy', 'hidden', 'disabled'] });
+      addEventListener('scroll', () => { changedAt = Date.now(); }, { passive: true });
+      Object.defineProperty(window, '__webpilotPageActivity', { configurable: false, writable: false, value: Object.freeze({
+        read: () => ({ ready: document.readyState !== 'loading', changedAt, quietForMs: Math.max(0, Date.now() - changedAt),
+          busy: [...document.querySelectorAll('[aria-busy="true"]')].some(element => element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden') }),
+      }) });
+    });
+    await context.addInitScript(() => {
       // A fixed visual pointer accompanies real page mouse events. It is not an
       // OS cursor and is removed from screenshots sent to the model.
       if (window !== window.top) return;
@@ -261,7 +337,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         style(host, { position: 'fixed', top: '0', left: '0', width: '0', height: '0', 'z-index': '2147483647', 'pointer-events': 'none', display: hidden ? 'none' : 'block' });
         const shadow = host.attachShadow({ mode: 'closed' });
         pointer = document.createElement('div');
-        style(pointer, { position: 'absolute', transform: 'translate(24px, 24px)', transition: 'transform 550ms cubic-bezier(.22,.8,.3,1)', 'pointer-events': 'none' });
+        style(pointer, { position: 'absolute', transform: 'translate(24px, 24px)', transition: 'transform 140ms cubic-bezier(.22,.8,.3,1)', 'pointer-events': 'none' });
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.setAttribute('width', '25'); svg.setAttribute('height', '31'); svg.setAttribute('viewBox', '0 0 25 31');
         style(svg, { display: 'block', filter: 'drop-shadow(0 2px 3px #00000035)' });
@@ -274,7 +350,17 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         pointer.append(ring, svg); shadow.append(pointer); document.documentElement.append(host);
       }
       const api = Object.freeze({
-        move(x, y) { mount(); if (pointer) pointer.style.transform = `translate(${x}px, ${y}px)`; },
+        move(x, y) {
+          mount();
+          const transform = `translate(${x}px, ${y}px)`;
+          if (!pointer || pointer.style.transform === transform) return;
+          return new Promise(resolve => {
+            const done = () => { clearTimeout(timer); pointer.removeEventListener('transitionend', done); resolve(); };
+            const timer = setTimeout(done, 170);
+            pointer.addEventListener('transitionend', done, { once: true });
+            pointer.style.transform = transform;
+          });
+        },
         click() { mount(); ring?.animate([{ opacity: .85, transform: 'scale(.2)' }, { opacity: 0, transform: 'scale(1.8)' }], { duration: 700, easing: 'ease-out' }); },
         visible(value) { hidden = !value; mount(); if (host) host.style.display = hidden ? 'none' : 'block'; },
       });
@@ -290,22 +376,42 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       await windowSession.send('Browser.setWindowBounds', { windowId: browserWindowId, bounds: { windowState: 'maximized' } });
     }
     await page.bringToFront();
-    if (process.platform === 'win32') await focusManagedEdge(browserPid);
+    await focusController?.focus();
     page.on('download', download => { blocked('파일 다운로드'); void download.cancel().catch(() => {}); });
     page.on('dialog', dialog => { blocked('사이트 대화상자'); void dialog.dismiss().catch(() => {}); });
     page.on('filechooser', () => blocked('파일 선택 창'));
     page.setDefaultTimeout(5000);
+    page.on('framenavigated', frame => {
+      if (frame === page.mainFrame()) { readinessDirty = true; activitySince = Date.now(); }
+    });
     await page.goto(target.href, { waitUntil: 'domcontentloaded', timeout: 30000 });
     const settleNavigation = async () => {
       const deadline = Date.now() + 15000;
       do {
-        await page.waitForTimeout(100);
         await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
         if (!pendingNavigation) return;
+        await page.waitForTimeout(30);
+        assertActive();
       } while (Date.now() < deadline);
       throw new SitePolicyError('사이트 이동이 제한 시간 안에 완료되지 않았습니다.');
     };
-    await settleNavigation();
+    const settlePage = async () => {
+      await settleNavigation();
+      if (!readinessDirty) return;
+      await waitForPageReady({ signal, expectChange: expectPageChange, read: async () => {
+        assertActive();
+        const state = await readWithNavigationRecovery({ signal, assertActive,
+          read: () => page.evaluate(() => window.__webpilotPageActivity?.read() ?? { ready: document.readyState !== 'loading', quietForMs: 0, busy: false }),
+          recover: async () => { await settleNavigation(); await sleep(30, undefined, { signal }); },
+        });
+        return { ...state, changed: state.changedAt >= activitySince, pending: [...activeRequests.values()].some(started => started >= activitySince) || Boolean(pendingNavigation) };
+      } });
+      await settleNavigation();
+      readinessDirty = false;
+      assertActive();
+    };
+    const markAction = (expectChange = true) => { readinessDirty = true; expectPageChange = expectChange; activitySince = Date.now(); };
+    await settlePage();
     assertActive();
     status('허용된 사이트에서 탐색 준비 완료');
     const foreground = async () => {
@@ -316,15 +422,15 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         await windowSession.send('Browser.setWindowBounds', { windowId: browserWindowId, bounds: { windowState: 'maximized' } });
       }
       await page.bringToFront();
-      if (process.platform === 'win32') await focusManagedEdge(browserPid);
-      await page.waitForTimeout(180);
+      await focusController?.focus();
       assertActive();
     };
     const viewportSize = () => page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
     const movePointer = async (x, y) => {
-      await page.evaluate(({ x, y }) => window.__webpilotVisualPointer?.move(x, y), { x, y });
-      await page.mouse.move(x, y, { steps: 20 });
-      await page.waitForTimeout(560);
+      await Promise.all([
+        page.evaluate(({ x, y }) => window.__webpilotVisualPointer?.move(x, y), { x, y }),
+        page.mouse.move(x, y, { steps: 4 }),
+      ]);
       assertActive();
     };
     const clickPointer = async () => { await page.evaluate(() => window.__webpilotVisualPointer?.click()); };
@@ -397,7 +503,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       await clickPointer();
       await page.mouse.click(point.x, point.y, { button: 'left' });
       await field.fill('');
-      await field.type(value, { delay: 35, timeout: 5000 + value.length * 40 });
+      await field.type(value, { delay: typingDelay(value.length), timeout: 5000 + value.length * 6 });
     };
 
     const login = async () => {
@@ -428,11 +534,11 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         loginPermit = { ...metadata, allowedOrigin, used: false, expires: Date.now() + 5000 };
         await form.evaluate((element, mode) => window.__webpilotLoginForm.arm(element, mode), metadata.mode);
         await clickPointer();
+        markAction();
         await page.mouse.click(point.x, point.y, { button: 'left' });
-        while (!loginPermit.used && Date.now() < loginPermit.expires) { await page.waitForTimeout(100); assertActive(); }
+        while (!loginPermit.used && Date.now() < loginPermit.expires) { await page.waitForTimeout(30); assertActive(); }
         await loginPermit.completion;
-        await page.waitForTimeout(450);
-        await settleNavigation();
+        await settlePage();
         const used = loginPermit?.used;
         const failure = loginPermit?.failure;
         loginPermit = undefined;
@@ -456,7 +562,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       async observe() {
         assertActive();
         await foreground();
-        await settleNavigation();
+        await settlePage();
         await clearSnapshot();
         if (credentials && await challengePresent()) throw new SitePolicyError('추가 인증 또는 CAPTCHA가 필요하여 자동 탐색을 중지했습니다.');
         const view = await page.evaluate(() => {
@@ -477,29 +583,40 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         });
         const elements = [];
         const candidates = await page.$$('a[href],button,input,textarea');
-        for (const handle of candidates) {
-          if (elements.length >= 60) { await handle.dispose(); continue; }
-          const metadata = await handle.evaluate(element => {
-            const rect = element.getBoundingClientRect();
-            if (!rect.width || !rect.height || rect.right <= 0 || rect.bottom <= 0 || rect.left >= innerWidth || rect.top >= innerHeight || getComputedStyle(element).visibility === 'hidden' || element.closest('[inert]') || element.disabled || element.getAttribute('aria-disabled') === 'true') return null;
-            const input = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
-            // Never expose control values, password fields, or credential metadata.
-            if (input && (element.readOnly || element instanceof HTMLInputElement && !['text', 'search', 'url'].includes(element.type))) return null;
-            if (!input && (element.closest('form') || element instanceof HTMLButtonElement && (element.type !== 'button' || element.form))) return null;
-            if (element instanceof HTMLAnchorElement && (element.download || element.hasAttribute('download') || element.target && element.target.toLowerCase() !== '_self')) return null;
-            const label = [element.getAttribute('aria-label'), element.getAttribute('title'), input ? element.placeholder : element.textContent, ...Array.from(element.labels ?? []).map(label => label.textContent)].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 240);
-            return { role: input ? 'textbox' : element instanceof HTMLAnchorElement ? 'link' : 'button', label, type: input ? element.type : 'click', href: element instanceof HTMLAnchorElement ? element.href : undefined,
-              description: input ? [element.type, element.name, element.id, element.placeholder, element.autocomplete, label, element.form?.action, element.form?.id, element.form?.name].filter(Boolean).join(' ') : label };
-          }).catch(() => null);
-          let permitted = metadata && !(metadata.role === 'textbox' ? SENSITIVE_INPUT.test(metadata.description) : SENSITIVE_LABEL.test(metadata.description));
-          if (metadata?.href) {
-            try { permitted &&= validateTargetUrl(metadata.href).origin === allowedOrigin && redact(metadata.href) === metadata.href; } catch { permitted = false; }
+        const discarded = [];
+        const readCandidate = handle => handle.evaluate(element => {
+          const rect = element.getBoundingClientRect();
+          if (!rect.width || !rect.height || rect.right <= 0 || rect.bottom <= 0 || rect.left >= innerWidth || rect.top >= innerHeight || getComputedStyle(element).visibility === 'hidden' || element.closest('[inert]') || element.disabled || element.getAttribute('aria-disabled') === 'true') return null;
+          const input = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
+          // Never expose control values, password fields, or credential metadata.
+          if (input && (element.readOnly || element instanceof HTMLInputElement && !['text', 'search', 'url'].includes(element.type))) return null;
+          if (!input && (element.closest('form') || element instanceof HTMLButtonElement && (element.type !== 'button' || element.form))) return null;
+          if (element instanceof HTMLAnchorElement && (element.download || element.hasAttribute('download') || element.target && element.target.toLowerCase() !== '_self')) return null;
+          const label = [element.getAttribute('aria-label'), element.getAttribute('title'), input ? element.placeholder : element.textContent, ...Array.from(element.labels ?? []).map(label => label.textContent)].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 240);
+          return { role: input ? 'textbox' : element instanceof HTMLAnchorElement ? 'link' : 'button', label, type: input ? element.type : 'click', href: element instanceof HTMLAnchorElement ? element.href : undefined,
+            description: input ? [element.type, element.name, element.id, element.placeholder, element.autocomplete, label, element.form?.action, element.form?.id, element.form?.name].filter(Boolean).join(' ') : label };
+        }).catch(() => null);
+        let cursor = 0;
+        while (cursor < candidates.length && elements.length < 60) {
+          const batch = candidates.slice(cursor, cursor + 12);
+          cursor += batch.length;
+          const metadataBatch = await Promise.all(batch.map(readCandidate));
+          for (let index = 0; index < batch.length; index++) {
+            const handle = batch[index];
+            const metadata = metadataBatch[index];
+            if (elements.length >= 60) { discarded.push(handle); continue; }
+            let permitted = metadata && !(metadata.role === 'textbox' ? SENSITIVE_INPUT.test(metadata.description) : SENSITIVE_LABEL.test(metadata.description));
+            if (metadata?.href) {
+              try { permitted &&= validateTargetUrl(metadata.href).origin === allowedOrigin && redact(metadata.href) === metadata.href; } catch { permitted = false; }
+            }
+            if (!permitted) { discarded.push(handle); continue; }
+            const id = randomUUID();
+            elementSnapshot.set(id, handle);
+            elements.push({ id, role: metadata.role, label: redact(metadata.label), type: metadata.type, ...(metadata.href ? { href: redact(metadata.href) } : {}) });
           }
-          if (!permitted) { await handle.dispose(); continue; }
-          const id = randomUUID();
-          elementSnapshot.set(id, handle);
-          elements.push({ id, role: metadata.role, label: redact(metadata.label), type: metadata.type, ...(metadata.href ? { href: redact(metadata.href) } : {}) });
         }
+        discarded.push(...candidates.slice(cursor));
+        await Promise.allSettled(discarded.map(handle => handle.dispose()));
         const form = credentials && !loginAttempted && !await challengePresent() ? await detectLoginForm() : null;
         const loginAvailable = Boolean(form);
         await form?.form.dispose();
@@ -509,10 +626,9 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       async act(rawAction) {
         const action = validateDomAction(rawAction);
         assertActive();
-        await foreground();
         lastBlocked = '';
         try {
-          if (action.action === 'login') return await login();
+          if (action.action === 'login') { await foreground(); return await login(); }
           if (action.action === 'scroll') {
             const viewport = await viewportSize();
             return await session.perform({ type: 'scroll', x: Math.floor(viewport.width / 2), y: Math.floor(viewport.height / 2), scroll_x: 0, scroll_y: action.scroll_y });
@@ -532,7 +648,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       async capture() {
         assertActive();
         await foreground();
-        await settleNavigation();
+        await settlePage();
         await page.evaluate(() => window.__webpilotVisualPointer?.visible(false));
         try {
           const screenshot = await page.screenshot({ type: 'png', scale: 'css', fullPage: false, timeout: 15000 });
@@ -578,6 +694,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
             if (destination.origin !== allowedOrigin) { blocked('허용된 사이트 밖의 링크'); throw new SitePolicyError('허용된 사이트 밖의 링크는 클릭하지 않습니다.'); }
           }
           await clickPointer();
+          markAction();
           await page.mouse.click(action.x, action.y, { button: 'left' });
         } else if (action.type === 'type') {
           await movePointer(action.x, action.y);
@@ -603,20 +720,21 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
               throw new SitePolicyError('검색 등 일반 텍스트 입력란만 사용할 수 있습니다. 계정·비밀번호·개인정보·결제 필드는 입력하지 않습니다.');
             }
             await clickPointer();
+            markAction();
             await page.mouse.click(action.x, action.y, { button: 'left' });
             assertActive();
             await field.fill('');
             const marker = randomUUID();
             await field.evaluate((element, marker) => element.setAttribute('data-webpilot-input-target', marker), marker);
-            try { await page.locator(`[data-webpilot-input-target="${marker}"]`).pressSequentially(action.text, { delay: 35, timeout: 15000 }); }
+            try { await page.locator(`[data-webpilot-input-target="${marker}"]`).pressSequentially(action.text, { delay: typingDelay(action.text.length), timeout: 10000 }); }
             finally { await field.evaluate(element => element.removeAttribute('data-webpilot-input-target')).catch(() => {}); }
           } finally { await handle.dispose(); }
         } else {
           await movePointer(action.x, action.y);
+          markAction(false);
           await page.mouse.wheel(action.scroll_x, action.scroll_y);
         }
-        await page.waitForTimeout(450);
-        await settleNavigation();
+        await settlePage();
         assertActive();
         return { message: lastBlocked ? `차단: ${lastBlocked}` : action.type === 'click' ? '허용된 사이트 안에서 링크 또는 일반 버튼을 클릭했습니다.' : action.type === 'type' ? '일반 입력란에 텍스트를 입력했습니다. 제출하지 않았습니다.' : '허용된 사이트 화면을 스크롤했습니다.', url: redact(page.url()) };
       },
@@ -630,4 +748,4 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
   }
 }
 
-module.exports = { startSiteSession, validateTargetUrl, validateAction, validateDomAction, matchesLoginRequest, requestPolicy, isBlockedPath, SitePolicyError, VIEWPORT };
+module.exports = { startSiteSession, validateTargetUrl, validateAction, validateDomAction, matchesLoginRequest, requestPolicy, isBlockedPath, SitePolicyError, VIEWPORT, waitForPageReady, typingDelay, readWithNavigationRecovery };
