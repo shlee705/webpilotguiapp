@@ -18,6 +18,12 @@ export const BACKEND_NUMBER_FIELDS = {
   workers: { label: '동시 검사 실행 수', max: 8, integer: true },
 } as const;
 export type BackendNumberField = keyof typeof BACKEND_NUMBER_FIELDS;
+export function hasShortBackendTurnLimit(value: BackendRunOptions): boolean {
+  return (['maxTurns', 'turnsPerTemplate'] as const).some(name => {
+    const turns = value[name] ?? BACKEND_RUN_DEFAULTS[name];
+    return Number.isInteger(turns) && turns >= 1 && turns <= 3;
+  });
+}
 const allowed = new Set([...Object.keys(BACKEND_RUN_DEFAULTS), 'provider', 'models']);
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const validModel = (value: unknown): value is string => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(value);

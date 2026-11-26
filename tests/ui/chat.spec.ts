@@ -705,6 +705,75 @@ test('QA backend defaults persist and apply only to new plans while per-run over
   expect(await page.evaluate(() => (window as any).__native.backendSaved)).toEqual([]);
 });
 
+test('short QA turn guidance changes only turn limits after explicit action and saves no model calls', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  const original = await page.evaluate(() => {
+    const settings = (window as any).__backendSettings;
+    settings.provider = 'openai';
+    settings.runDefaults = { ...settings.runDefaults, budgetUsd: 2.5, exploreMinutes: 5, maxPages: 5, maxTemplates: 3, turnsPerTemplate: 1, maxTurns: 3 };
+    return structuredClone(settings.runDefaults);
+  });
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '실제 검사 백엔드', exact: true }).click();
+  const guidance = page.getByRole('note', { name: '탐색 턴 한도 안내', exact: true });
+  await expect(guidance).toBeVisible();
+  await expect(guidance).toContainText('계획');
+  await guidance.screenshot({ path: 'screenshots/backend-short-turns.png' });
+  await expect(page.locator('.tour-backend-advanced')).not.toHaveAttribute('open', '');
+  await expect(page.getByLabel('페이지 종류별 탐색 턴', { exact: true })).toHaveValue('1');
+  await expect(page.getByLabel('대화별 최대 턴', { exact: true })).toHaveValue('3');
+  expect(await page.evaluate(() => (window as any).__native.backendSaved)).toEqual([]);
+  await page.getByRole('button', { name: '기본 턴 한도 적용', exact: true }).click();
+  await expect(guidance).toHaveCount(0);
+  await expect(page.getByLabel('페이지 종류별 탐색 턴', { exact: true })).toHaveValue('25');
+  await expect(page.getByLabel('대화별 최대 턴', { exact: true })).toHaveValue('40');
+  await expect(page.getByLabel('검사 예산 (USD)', { exact: true })).toHaveValue('2.5');
+  await expect(page.getByLabel('최대 방문 페이지', { exact: true })).toHaveValue('5');
+  expect(await page.evaluate(() => (window as any).__backendSettings.runDefaults)).toEqual(original);
+  expect(await page.evaluate(() => (window as any).__native.backendSaved)).toEqual([]);
+  await page.getByRole('button', { name: '백엔드 설정 저장', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.backendSaved)).toEqual([{
+    provider: 'openai', models: { plan: 'gpt-6.2-sol', triage: 'gpt-6-luna' },
+    runDefaults: { ...original, turnsPerTemplate: 25, maxTurns: 40 },
+  }]);
+  expect(await page.evaluate(() => ({ requests: (window as any).__native.requests, tested: (window as any).__native.backendTested, visualSaved: (window as any).__native.saved }))).toEqual({ requests: [], tested: [], visualSaved: [] });
+});
+
+test('short per-run turn guidance preserves chosen quotas and never updates global defaults', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  const original = await page.evaluate(() => {
+    const settings = (window as any).__backendSettings;
+    settings.runDefaults = { ...settings.runDefaults, budgetUsd: 3.5, maxPages: 5, turnsPerTemplate: 1, maxTurns: 3 };
+    return structuredClone(settings.runDefaults);
+  });
+  await send(page, 'https://example.com 짧은 탐색 한도 확인');
+  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
+  const guidance = page.getByRole('note', { name: '탐색 턴 한도 안내', exact: true });
+  await expect(guidance).toBeVisible();
+  await page.getByRole('button', { name: '기본 턴 한도 적용', exact: true }).click();
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  const options = await page.evaluate(() => JSON.parse(localStorage.getItem('webpilot.conversations.v1')!)[0].messages.at(-1).plan.backendOptions);
+  expect(options).toMatchObject({ ...original, turnsPerTemplate: 25, maxTurns: 40 });
+  expect(await page.evaluate(() => (window as any).__backendSettings.runDefaults)).toEqual(original);
+  expect(await page.evaluate(() => (window as any).__native.backendSaved)).toEqual([]);
+
+  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
+  await page.getByText('백엔드 고급 검사 설정', { exact: true }).click();
+  await page.getByLabel('페이지 종류별 탐색 턴', { exact: true }).fill('1');
+  await page.getByLabel('대화별 최대 턴', { exact: true }).fill('3');
+  await expect(guidance).toBeVisible();
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).__native.requests)).toEqual([]);
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__native.requests[0].backendOptions)).toMatchObject(original);
+  expect(await page.evaluate(() => (window as any).__backendSettings.runDefaults)).toEqual(original);
+  expect(await page.evaluate(() => (window as any).__native.backendSaved)).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__native.backendTested)).toEqual([]);
+});
+
 test('invalid QA backend defaults never reach native storage and drafts are discarded on reopen', async ({ page }) => {
   await nativeFixture(page);
   await page.goto('/');

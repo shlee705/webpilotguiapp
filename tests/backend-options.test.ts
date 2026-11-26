@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeBackendLoginUrl, normalizeBackendOptions, normalizeBackendDefaults, backendOptionsFromSettings, BACKEND_RUN_DEFAULTS } from '../src/lib/backend-options';
+import { normalizeBackendLoginUrl, normalizeBackendOptions, normalizeBackendDefaults, backendOptionsFromSettings, hasShortBackendTurnLimit, BACKEND_RUN_DEFAULTS } from '../src/lib/backend-options';
 
 test('backend options preserve exact per-run limits independently from visual configuration', () => {
   const input = { provider: 'openai', models: { plan: 'gpt-6.2-astra', triage: 'gpt-5.4-mini' }, budgetUsd: 2.5, exploreMinutes: 9,
@@ -49,6 +49,18 @@ test('saved defaults allow only numeric and enum inspection limits with legacy f
   for (const value of [{ apiKey: 'private' }, { credentials: {} }, { provider: 'openai' }, { models: {} }, { maxPages: 0 }, { workers: 1.5 }, { budgetUsd: NaN }]) {
     assert.throws(() => normalizeBackendDefaults(value));
   }
+});
+
+test('short turn guidance covers both exploration modes without raising a user limit', () => {
+  assert.equal(hasShortBackendTurnLimit({}), false);
+  assert.equal(hasShortBackendTurnLimit({ maxTurns: 1 }), true);
+  assert.equal(hasShortBackendTurnLimit({ turnsPerTemplate: 3 }), true);
+  assert.equal(hasShortBackendTurnLimit({ maxTurns: 0, turnsPerTemplate: NaN }), false);
+  assert.equal(hasShortBackendTurnLimit({ maxTurns: 4, turnsPerTemplate: 5 }), false);
+  const options = normalizeBackendOptions({ maxTurns: 1, turnsPerTemplate: 2 });
+  assert.equal(hasShortBackendTurnLimit(options), true);
+  assert.equal(options.maxTurns, 1);
+  assert.equal(options.turnsPerTemplate, 2);
 });
 
 test('login URL accepts relative same-origin paths and rejects other origins or embedded account values', () => {

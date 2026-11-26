@@ -6,8 +6,10 @@ import path from 'node:path';
 
 // PDF fonts, CMaps and image decoders ship with the app; viewing needs no CDN.
 function pdfAssets(): Plugin {
-  const root = fileURLToPath(new URL('./node_modules/pdfjs-dist/', import.meta.url));
+  const modules = fileURLToPath(new URL('./node_modules/', import.meta.url));
+  const root = path.join(modules, 'pdfjs-dist');
   const directories = ['cmaps', 'standard_fonts', 'wasm', 'iccs'];
+  const bundledLicenses = ['pdfjs-dist', 'lucide-react', 'react', 'react-dom'];
   return {
     name: 'local-pdf-assets',
     configureServer(server) {
@@ -23,6 +25,11 @@ function pdfAssets(): Plugin {
     generateBundle() {
       for (const directory of directories) for (const entry of readdirSync(path.join(root, directory), { withFileTypes: true })) {
         if (entry.isFile()) this.emitFile({ type: 'asset', fileName: `pdfjs/${directory}/${entry.name}`, source: readFileSync(path.join(root, directory, entry.name)) });
+      }
+      // Renderer dependencies are bundled into dist, so retain their notices
+      // even though their duplicate node_modules copies are not distributed.
+      for (const dependency of bundledLicenses) {
+        this.emitFile({ type: 'asset', fileName: `licenses/${dependency}-LICENSE.txt`, source: readFileSync(path.join(modules, dependency, 'LICENSE')) });
       }
     },
   };

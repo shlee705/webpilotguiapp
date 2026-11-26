@@ -90,9 +90,7 @@ async function exploreSite(o: Parameters<typeof explore>[0]): Promise<ExploreRes
   // evidence and let the normal empty-plan pipeline produce an incomplete PDF.
   if (!map.visited.length) {
     const detail = '대상 페이지를 열지 못해 탐색·검사를 시작하지 못했습니다. 대상 서버와 URL·포트를 확인해 주세요.';
-    const plan: Plan = { version: 1, requirements: o.requirements, features: [], scenarios: [],
-      unplanned: o.requirements.map(requirement => ({ requirement: requirement.id, reason: detail })),
-      observations: [], questions: [], targets: {} };
+    const plan = diagnosticPlan(o.requirements, detail);
     return { stop: 'error', detail, messages: [], turns: [], plan, blocked: [...reader.blocked],
       violations: reader.violations.map(v => `사이트 지도 수집 중 ${v}`), sitemap: map, complete: false, exploredUrls: [],
       conversations: [{ template: map.templates.find(t => t.pages.includes(new URL(o.startUrl).href))?.key ?? o.startUrl,
@@ -207,12 +205,45 @@ async function exploreSite(o: Parameters<typeof explore>[0]): Promise<ExploreRes
     const questions = part.questions.map(q => submitted.has(q.id) || !q.feature ? q : (({ feature: _, ...rest }) => rest)(q));
     const merged = plans.length ? (single ? plans[0] : { ...mergePlans(plans, o.requirements), questions }) : undefined;
     const tainted = !!merged && violations.length > 0;
-    const plan = tainted ? undefined : merged && cloneScenarios(merged, otherPages(merged, map, o.pagesPerTemplate ?? 3));
-    // 한도 때문에 대화를 하나도 시작하지 못했으면 한도 사유로 끝난다.
-    return { messages: [], ...last, stop: plan ? 'done' : tainted ? 'error' : last?.stop ?? 'budget',
-      ...(tainted ? { detail: `정책 위반이 있어 계획을 버림: ${violations.join(', ')}` } : last ? {} : { detail: stopped }),
+    const accepted = tainted ? undefined : merged && cloneScenarios(merged, otherPages(merged, map, o.pagesPerTemplate ?? 3));
+    const stop = accepted ? 'done' : tainted ? 'error' : last?.stop ?? 'budget';
+    const reason = tainted ? '정책 위반이 있어 계획을 버렸습니다. 해당 계획의 검사를 실행하지 않았습니다.'
+      : !last && stopped === '탐색 시간 한도' ? '설정된 탐색 시간 한도로 유효한 검사 계획을 확보하지 못했습니다.'
+      : planningStoppedReason(stop, o.maxTurns, o.turnsPerTemplate ?? 25);
+    // 한도·거부·오류로 제출을 마치지 못해도 수집한 범위를 정상 보고 경로로 보낸다.
+    // 빈 진단 계획은 검사 시나리오가 아니며, 검증을 통과한 부분 계획은 기존대로 실행한다.
+    const plan = accepted ?? diagnosticPlan(o.requirements, reason);
+    if (!accepted) for (const c of conversations) {
+      if (tainted) { c.planned = false; c.detail = reason; }
+      else if (!c.planned && !c.detail) c.detail = planningStoppedReason(c.stop, o.maxTurns, o.turnsPerTemplate ?? 25);
+    }
+    // 한도 때문에 대화를 하나도 시작하지 못했으면 기존 한도 사유와 실제 종료 상태를 보존한다.
+    return { messages: [], ...last, stop,
+      ...(tainted ? { detail: reason } : last?.detail ? {} : { detail: stopped ?? (!accepted ? reason : undefined) }),
       turns, plan, blocked, violations, sitemap: map, conversations,
-      complete: (single ? [{ key: startKey ?? o.startUrl }] : ordered).every(t => conversations.some(c => covers(c, t.key) && c.planned)), exploredUrls: [...part.urls] };
+      complete: !!accepted && (single ? [{ key: startKey ?? o.startUrl }] : ordered).every(t => conversations.some(c => covers(c, t.key) && c.planned)), exploredUrls: [...part.urls] };
+  }
+}
+
+/** 실행 가능한 검사를 만들지 않고 미검사 요구사항·실제 탐색 범위를 보고서에 남긴다. */
+function diagnosticPlan(requirements: Requirement[], reason: string): Plan {
+  return { version: 1, requirements, features: [], scenarios: [],
+    unplanned: requirements.map(requirement => ({ requirement: requirement.id, reason })),
+    observations: [], questions: [], targets: {} };
+}
+
+/** 모델·페이지·오류 원문을 덧붙이지 않는 한정된 진단 문구. 실제 설정값만 안내한다. */
+function planningStoppedReason(stop: ExploreResult['conversations'][number]['stop'], maxTurns: number, turnsPerTemplate: number): string {
+  switch (stop) {
+    case 'max_turns': return `설정된 턴 한도(대화별 최대 ${maxTurns}턴, 페이지 종류별 ${turnsPerTemplate}턴) 안에 유효한 검사 계획을 제출하지 못했습니다.`
+      + (Math.min(maxTurns, turnsPerTemplate) <= 3 ? ' 1~3턴의 짧은 한도는 페이지 확인·대상 고정·계획 제출에 부족할 수 있습니다.' : '');
+    case 'budget': return '설정된 예산 한도로 유효한 검사 계획을 확보하지 못했습니다.';
+    case 'not_attempted': return '설정된 탐색 한도로 이 페이지 종류의 검사 계획을 시작하지 못했습니다.';
+    case 'refusal': return '모델이 응답을 거부해 유효한 검사 계획을 확보하지 못했습니다.';
+    case 'max_tokens': return '모델의 출력 한도로 유효한 검사 계획을 확보하지 못했습니다.';
+    case 'stalled': return '페이지 변화 없는 탐색이 반복되어 유효한 검사 계획 없이 탐색을 중단했습니다.';
+    case 'error': return '탐색 중 오류로 유효한 검사 계획을 확보하지 못했습니다.';
+    default: return '검증을 통과한 검사 계획이 제출되지 않아 실제 검사를 수행하지 못했습니다.';
   }
 }
 

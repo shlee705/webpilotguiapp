@@ -460,7 +460,8 @@ test('일찍 통과한 계획: reviewEarly면 한 번 더 볼 것을 묻고, 그
   ]);
   const dropped = await explore({ browser: browser!, policy: { origins: [origin] }, startUrl: origin + '/list.html', requirements: [], reviewEarly: true,
     send: changed, model: 'claude-opus-5-5', budget: new Budget(1), maxTurns: 20 });
-  assert.equal(dropped.plan, undefined, '모델이 뺀 시나리오를 확정하지 않는다');
+  assert.deepEqual(dropped.plan?.scenarios, [], '모델이 뺀 시나리오를 되살리지 않고 진단 계획만 남긴다');
+  assert.equal(dropped.complete, false);
 });
 
 test('다른 쿼리에서 pin한 시작 대상은 시작 URL을 새로 열어 확인하고, 그 확인은 계획에 남아 실행 검증도 통과한다', async () => {
@@ -609,8 +610,9 @@ test('여러 페이지 사이트: 사이트 지도를 만들고 페이지 종류
   };
   const tainted = await explore({ browser: browser!, policy: { origins: [origin] }, startUrl: origin + '/home.html',
     requirements: [], send: away, model: 'claude-opus-5-5', budget: new Budget(1), maxTurns: 20 });
-  assert.deepEqual([tainted.plan, tainted.stop, tainted.conversations[0].planned], [undefined, 'error', true]);
-  assert.match(tainted.detail ?? '', /정책 위반이 있어 계획을 버림: redirect http:\/\/localhost:9\//);
+  assert.deepEqual([tainted.plan?.scenarios, tainted.stop, tainted.conversations[0].planned, tainted.complete], [[], 'error', false, false]);
+  assert.match(tainted.detail ?? '', /정책 위반이 있어 계획을 버렸습니다/);
+  assert.ok(tainted.violations.some(v => v.includes('redirect http://localhost:9/')));
 
   // 동시 실행의 번호 구간 밖 ID는 제출에서 거부한다(상품 대화가 S1·F1을 쓰려 함).
   const results: string[] = [];
@@ -661,7 +663,7 @@ test('기본 한도: 분류 몫을 남길 수 없거나 탐색 시간이 지나�
   const keptBudget = new Budget(1);
   const kept = await explore({ ...base, budget: keptBudget, keepUsd: 1.5 });
   assert.equal(keptBudget.floorUsd, 0, '탐색이 끝나면 분류 몫 하한을 되돌린다');
-  assert.deepEqual([kept.stop, kept.detail, kept.plan, kept.complete], ['budget', '예산 한도(분류 몫 남김)', undefined, false]);
+  assert.deepEqual([kept.stop, kept.detail, kept.plan?.scenarios, kept.complete], ['budget', '예산 한도(분류 몫 남김)', [], false]);
   assert.ok(kept.conversations.every(c => c.stop === 'not_attempted' && c.detail === '예산 한도(분류 몫 남김)'), JSON.stringify(kept.conversations));
   const late = await explore({ ...base, budget: new Budget(1), deadline: Date.now() - 1 });
   assert.deepEqual([late.stop, late.detail], ['budget', '탐색 시간 한도']);

@@ -1,10 +1,10 @@
-# WebPilot Desktop 1.0.2
+# WebPilot Desktop 1.0.3
 
 URL과 요구사항을 실제 WebTestPilot 백엔드에 전달하고, 백엔드가 현재 탐색 중인 페이지를 별도의 전용 Edge에서 보여주는 Windows GUI입니다. 화면에는 **웹사이트 버그 탐색중...**으로 표시합니다. 실제 검사·판정·보고서 생성은 백엔드가, Computer Use의 클릭·입력 표현은 앱에서 선택한 GPT 또는 Claude 모델이 담당합니다.
 
 ## 시작
 
-1. `release/1.0.2/win-unpacked/WebPilot.exe`를 실행합니다. 배포 폴더 전체가 필요합니다.
+1. `release/1.0.3/win-unpacked/WebPilot.exe`를 실행합니다. 배포 폴더 전체가 필요합니다.
 2. 왼쪽 아래 **QA팀 → 실제 검사 백엔드**에서 GPT 또는 Claude, 계획·탐색 모델, 판정 모델과 백엔드 전용 키를 저장합니다. 예산·시간·페이지 수와 고급 검사 옵션의 기본값도 지정합니다. 이 값은 백엔드 폴더의 `.env`에 기록하며 새 테스트부터 적용됩니다.
 3. **QA팀 → 화면 표현 AI**에서 별도로 **GPT (OpenAI)** 또는 **Claude (Anthropic)**를 선택하고, 그 아래의 **모델 → API 키**를 입력해 저장합니다. 기본값은 GPT-6 Luna이며 Claude의 초기 모델은 Claude Haiku 5.5입니다.
 4. URL과 검사할 내용을 보내고 **테스트 설정 → 설정 바꾸기**에서 실제 백엔드의 제공자·모델·검사 요구사항·예산·탐색 시간·페이지 수를 입력합니다. 고급 설정에서 페이지 종류·턴·동시 실행 수·추론 수준·탐색 묶음 방식을 지정합니다. 화면 표현 모델은 별도 영역에서 설정하며, 동작 횟수 지정 없이 실제 백엔드 진행을 따라갑니다.
@@ -53,6 +53,8 @@ QA팀의 **실제 검사 백엔드 → 새 테스트의 기본 검사 설정**�
 | 추론 수준 / 탐색 묶음 | `--plan-effort` / `--sessions` | medium / template |
 
 허용된 항목만 네이티브에서 다시 검증해 실행합니다. 임의 명령줄, API 키, 추가 origin이나 쓰기 허용 플래그는 이 입력에 포함할 수 없습니다. 실행 보고서의 `run.parameters`에는 실제 적용한 값이 기록되며 GUI는 실행 요청과 일치하는지 확인한 후 첨부합니다. 기존 기록의 보고서는 당시 형식으로 계속 검증합니다.
+
+탐색 턴은 페이지 수가 아니라 AI가 읽기·조작·계획 제출에 사용하는 대화 횟수입니다. 페이지 종류가 하나이면 **대화별 최대 턴**, 여러 개이면 **페이지 종류별 탐색 턴**을 사용합니다. 1~3턴처럼 짧게 설정하면 계획을 제출하기 전에 끝날 수 있습니다. 설정 화면의 **기본 턴 한도 적용**으로 각각 40턴·25턴을 선택할 수 있으며, 누르기 전에는 저장된 한도를 변경하지 않습니다. 계획을 만들지 못한 경우에도 실제 방문·점검 범위와 미검사 사유를 보고서에 남깁니다. 미검사 범위를 검사 완료로 바꾸거나 한도를 자동으로 늘리지는 않습니다.
 
 대상 페이지를 하나도 열지 못하면 모델 호출 없이 실패 증거를 담은 미완료 보고서를 생성합니다. 연결 거부·시간 초과 등 사유를 구분하며 정상 검사 완료로 표시하지 않습니다. `127.0.0.1`/`localhost` 주소를 검사하려면 해당 포트의 웹 서버가 실행 중이어야 합니다.
 
@@ -112,7 +114,7 @@ npm run setup:backend
 npm run desktop
 ```
 
-`setup:backend`(`backend:setup`도 동일)는 백엔드 루트·qa의 잠금 파일 기준 의존성과 전용 Chromium을 준비하고, 현재 Node.js를 `artifacts/backend-runtime/node.exe`에 복사합니다. 준비된 의존성과 브라우저는 재사용합니다. 사이트 검사나 유료 모델 API는 호출하지 않습니다.
+`setup:backend`(`backend:setup`도 동일)는 백엔드 루트·qa의 잠금 파일 기준 의존성과 전용 Chromium Headless Shell을 준비하고, 현재 Node.js를 `artifacts/backend-runtime/node.exe`에 복사합니다. 준비된 의존성과 브라우저는 재사용합니다. 사이트 검사나 유료 모델 API는 호출하지 않습니다.
 
 ```powershell
 npm run backend:check
@@ -122,9 +124,9 @@ npm run build
 npm run package
 ```
 
-`backend:check`는 설치·복사 없이 준비 상태를 확인합니다. `package`는 백엔드 준비와 GUI 빌드 후 `release/1.0.2/win-unpacked/`를 만듭니다. 배포에 백엔드 소스·프롬프트·런타임 의존성·전용 Chromium·Node.js를 포함하고, `.env`, 실행 결과, 평가 자료, 테스트 fixture, 개발 문서는 포함하지 않습니다.
+`backend:check`는 설치·복사 없이 준비 상태를 확인합니다. `package`는 백엔드 준비와 GUI 빌드 후 `release/1.0.3/win-unpacked/`를 만듭니다. 배포에는 백엔드 소스·프롬프트·검사에 필요한 Playwright·Chromium Headless Shell·Node.js를 포함합니다. GUI에 사용하지 않는 전체 Chromium, QA TypeScript 컴파일러·타입 정의, 중복 UI 패키지는 제외합니다. PDF 뷰어·worker·폰트·CMaps·이미지 디코더와 각 라이브러리의 라이선스 고지는 빌드 결과에 포함하며, Electron 언어 리소스는 한국어와 영어를 유지합니다. `.env`, 실행 로그·결과, 평가 자료, 테스트 fixture, 개발 문서는 배포하지 않습니다. 개발용 MCP의 `--headed` 실행에는 전체 Chromium을 별도로 설치해야 합니다.
 
-GUI 저장소의 배포 브랜치는 `1xx`입니다. `main`은 변경하지 않습니다. Windows 실행 폴더는 Git LFS로 관리하므로 Git LFS 설치 후 `git lfs pull --include="release/1.0.2/**"`로 실제 배포 파일을 받습니다. `WebPilot.exe`만 옮기지 말고 `win-unpacked` 폴더 전체를 함께 사용합니다. 실제 API 키·앱 개인 설정·로그인 세션·실행 기록은 소스와 배포본에서 제외합니다. 원본 WebTestPilot 저장소에는 푸시하지 않습니다.
+GUI 저장소의 배포 브랜치는 `1xx`입니다. `main`은 변경하지 않습니다. Windows 실행 폴더는 Git LFS로 관리하므로 Git LFS 설치 후 `git lfs pull --include="release/1.0.3/**"`로 실제 배포 파일을 받습니다. `WebPilot.exe`만 옮기지 말고 `win-unpacked` 폴더 전체를 함께 사용합니다. 실제 API 키·앱 개인 설정·로그인 세션·실행 기록은 소스와 배포본에서 제외합니다. 원본 WebTestPilot 저장소에는 푸시하지 않습니다.
 
 프로젝트 안에서 실행하면 로컬 `webtestpilot-backend`를 사용합니다. 프로젝트 밖의 배포본은 `resources/webtestpilot-backend`를 사용하므로 별도 환경변수 또는 그 폴더의 `.env`로 백엔드 키를 지정해야 합니다. 키 파일은 배포본에 자동으로 복사하지 않습니다.
 

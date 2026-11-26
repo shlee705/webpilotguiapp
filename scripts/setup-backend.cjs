@@ -66,7 +66,7 @@ function prepareBackend({ checkOnly = false } = {}) {
   if (!browserReady(environment)) {
     if (checkOnly) throw new Error('백엔드 Chromium이 준비되지 않았습니다. npm run backend:setup을 실행해 주세요.');
     console.log('백엔드 전용 Chromium을 준비합니다.');
-    run(process.execPath, [path.join(backendRoot, 'node_modules', 'playwright', 'cli.js'), 'install', 'chromium'], { cwd: backendRoot, env: environment });
+    run(process.execPath, [path.join(backendRoot, 'node_modules', 'playwright', 'cli.js'), 'install', '--only-shell', 'chromium'], { cwd: backendRoot, env: environment });
     if (!browserReady(environment)) throw new Error('설치한 백엔드 Chromium을 실행하지 못했습니다.');
   }
 

@@ -186,6 +186,11 @@
 .backend-primary-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .tour-backend-advanced { margin-top: 13px; }
 .tour-backend-advanced summary { cursor: pointer; font-size: 11px; color: #60606e; }
+.backend-turn-notice { margin-top: 12px; padding: 12px; border: 1px solid #e2ded3; border-radius: 8px; background: #fbfaf7; color: #716958; font-size: 11px; line-height: 1.7; }
+.backend-turn-notice p { margin: 0 0 10px; }
+.backend-turn-notice span { display: block; margin-top: 8px; font-size: 10px; }
+.backend-turn-notice .secondary-button { font-size: 11px; }
+.backend-turn-plan-note { margin: 12px 16px 0; color: #827765; font-size: 11px; line-height: 1.7; }
 .tour-role-heading { margin: 18px 0 12px; }
 .tour-plan-requirements { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
 @media (max-width: 550px) { .backend-primary-fields { grid-template-columns: minmax(0, 1fr); } }

@@ -1230,9 +1230,9 @@
     "paidApiCallsMade": false
   },
   "localIntegration": {
-    "date": "2026-11-26",
-    "guiVersion": "1.0.2",
-    "purpose": "Local desktop 1.0.2 integration: backend-driven visual execution without action quota, real execution worker progress, verified per-run parameters and reports, transient authenticated inspection, separate Claude/OpenAI roles. No upstream writes.",
+    "date": "2026-11-27",
+    "guiVersion": "1.0.3",
+    "purpose": "Local desktop 1.0.3 integration: diagnostic incomplete reports when exploration ends without a valid plan, explicit short-turn guidance and default reset, backend-driven visual execution, verified per-run parameters and reports, separate Claude/OpenAI roles. No upstream writes.",
     "modifiedUpstreamFiles": [
       {
         "path": "qa/src/agent.ts",
@@ -1247,7 +1247,7 @@
       {
         "path": "qa/src/explore.ts",
         "upstreamSha256": "0c1c5946a6e2010791be1805e0a64ad6722341e820d1dd3f4bd6c52dbcfbe14e",
-        "localSha256": "f66418a955c781141af8235ea40ac9bbf3b40c82680776ce22b76af88662cf7e"
+        "localSha256": "357cb10a08e10411843317d8b9224d64aa573d9961102484394e129c3b39f376"
       },
       {
         "path": "qa/src/fixture.ts",
@@ -1303,6 +1303,11 @@
         "path": "qa/test/run.test.ts",
         "upstreamSha256": "131422ff0870190748b39263a8d77e546218dadec5ca1a3b97ef5d2518ee9b06",
         "localSha256": "b7ecd3b12fd9b0b544fe6f8b9b9864b737ea98fbcf1b151789c7a9954b563cae"
+      },
+      {
+        "path": "qa/test/explore.test.ts",
+        "upstreamSha256": "e494319ea3f0229122adf8811ecede969956581a07243874bab5ab13f4706f60",
+        "localSha256": "4b9f347328abcf4eaf261d1bbd338dc35c11125341a8343281140fe87ad72993"
       }
     ],
     "addedFiles": [
@@ -1357,6 +1362,14 @@
       {
         "path": "qa/test/providers.test.ts",
         "sha256": "04c1c09da4b7f0563210077f6cef002061a0c843667943eb9723398c5d665745"
+      },
+      {
+        "path": "qa/test/exploration-limit.test.ts",
+        "sha256": "7536802bbda53fe18c3ea3df3cf3ed3772d0d59db42b180d30a57aa8005fd286"
+      },
+      {
+        "path": "qa/test/limit-cli.test.ts",
+        "sha256": "fc401eeef1404fa61ffa311ac8f933d8bec01be44f012f94578c190b2bf1f651"
       }
     ],
     "defaultModels": {
