@@ -1,7 +1,9 @@
-import type { AgentEvent, ChatMessage, LoginCredentials } from '../types';
+import type { AgentEvent, ApiProvider, BackendRunOptions, ChatMessage, LoginCredentials } from '../types';
 import { newId } from './storage';
 import { loginCredentialsError, parsePromptCredentials, redactKnownCredentials } from './credentials';
 import { parseReportResult } from './reports';
+import { parseInspection } from './inspection';
+import { normalizeBackendLoginUrl, normalizeBackendOptions } from './backend-options';
 
 export const DEFAULT_INACTIVITY_TIMEOUT_MS = 180_000;
 
@@ -9,8 +11,11 @@ export interface SendChatOptions {
   conversationId: string;
   messages: ChatMessage[];
   model: string;
+  provider?: ApiProvider;
   targetUrl?: string;
-  maxActions?: number;
+  backendOptions?: BackendRunOptions;
+  backendTask?: string;
+  backendLoginUrl?: string;
   credentials?: LoginCredentials;
   signal: AbortSignal;
   onEvent: (event: AgentEvent) => void;
@@ -23,22 +28,29 @@ function abortError(signal: AbortSignal): unknown {
 }
 
 /** All network requests and API credentials stay in the desktop main process. */
-export async function sendChat({ messages, model, targetUrl, maxActions, credentials, signal, onEvent, inactivityTimeoutMs = DEFAULT_INACTIVITY_TIMEOUT_MS }: SendChatOptions): Promise<void> {
+export async function sendChat({ messages, model, provider = 'openai', targetUrl, backendOptions, backendTask, backendLoginUrl, credentials, signal, onEvent, inactivityTimeoutMs = DEFAULT_INACTIVITY_TIMEOUT_MS }: SendChatOptions): Promise<void> {
   signal.throwIfAborted();
   const desktop = typeof window === 'undefined' ? undefined : window.pilotDesktop;
   if (!desktop?.startAiChat || !desktop.onAiEvent || !desktop.cancelAiChat) {
     throw new Error('AI 응답은 WebPilot 데스크톱 앱에서 사용할 수 있습니다. 데스크톱 앱을 실행하고 API 키를 설정해 주세요.');
   }
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,199}$/.test(model.trim())) throw new Error('올바른 AI 모델 ID를 선택해 주세요.');
-  if (maxActions !== undefined && (!Number.isSafeInteger(maxActions) || maxActions < 1)) throw new Error('버그 탐색 동작 횟수는 안전한 범위의 양의 정수여야 합니다.');
+  if (provider !== 'openai' && provider !== 'anthropic') throw new Error('올바른 AI 제공자를 선택해 주세요.');
   if (!Number.isSafeInteger(inactivityTimeoutMs) || inactivityTimeoutMs < 1 || inactivityTimeoutMs > 2_147_483_647) throw new Error('응답 대기 시간 설정이 올바르지 않습니다.');
+  if ((backendOptions !== undefined || backendTask !== undefined) && !targetUrl) throw new Error('백엔드 검사 설정에는 대상 URL이 필요합니다.');
+  const runOptions = backendOptions === undefined ? undefined : normalizeBackendOptions(backendOptions);
+  if (backendTask !== undefined && (typeof backendTask !== 'string' || !backendTask.trim() || backendTask.length > 16000)) throw new Error('백엔드 검사 요구사항은 1~16,000자로 입력해 주세요.');
   if (credentials) {
     const error = loginCredentialsError(credentials);
     if (error) throw new Error(error);
     if (!targetUrl) throw new Error('로그인 정보를 사용할 사이트 주소를 함께 지정해 주세요.');
   }
+  if (backendLoginUrl !== undefined && !credentials) throw new Error('로그인 URL을 사용할 계정을 함께 입력해 주세요.');
+  const loginUrl = targetUrl ? normalizeBackendLoginUrl(backendLoginUrl, targetUrl, credentials) : undefined;
   const requestId = newId();
-  const knownCredentials = [credentials, ...messages.map(message => parsePromptCredentials(message.content).credentials)].filter((value): value is LoginCredentials => !!value);
+  const knownCredentials = [credentials, parsePromptCredentials(backendTask ?? '').credentials, ...messages.map(message => parsePromptCredentials(message.content).credentials)].filter((value): value is LoginCredentials => !!value);
+  const backendPrompt = backendTask === undefined ? undefined : knownCredentials.reduce((safe, known) => redactKnownCredentials(safe, known), parsePromptCredentials(backendTask).text).trim();
+  if (backendPrompt !== undefined && !backendPrompt) throw new Error('백엔드 검사 요구사항을 입력해 주세요.');
   const context = messages
     .filter((message) => message.content.trim() && !(message.role === 'assistant' && (message.source === 'legacy' || message.source === 'local')))
     .map(({ role, content }) => ({ role, content: knownCredentials.reduce((safe, known) => redactKnownCredentials(safe, known), parsePromptCredentials(content).text) }));
@@ -87,6 +99,11 @@ export async function sendChat({ messages, model, targetUrl, maxActions, credent
         if (!report) return;
         event = { type: 'report', report };
       }
+      if (event.type === 'inspection') {
+        const inspection = parseInspection(event);
+        if (!inspection) return;
+        event = { type: 'inspection', ...inspection };
+      }
       if (event.type === 'done') {
         if (done) return;
         done = true;
@@ -106,7 +123,7 @@ export async function sendChat({ messages, model, targetUrl, maxActions, credent
       if (signal.aborted) { onAbort(); return; }
       started = true;
       resetWatchdog();
-      void desktop.startAiChat({ requestId, messages: context, model: model.trim(), ...(targetUrl ? { targetUrl } : {}), ...(maxActions !== undefined ? { maxActions } : {}), ...(credentials ? { credentials: { username: credentials.username, password: credentials.password } } : {}) }).then((result) => {
+      void desktop.startAiChat({ requestId, messages: context, provider, model: model.trim(), ...(targetUrl ? { targetUrl } : {}), ...(runOptions ? { backendOptions: runOptions } : {}), ...(backendPrompt !== undefined ? { backendTask: backendPrompt } : {}), ...(loginUrl ? { backendLoginUrl: loginUrl } : {}), ...(credentials ? { credentials: { username: credentials.username, password: credentials.password } } : {}) }).then((result) => {
         if (settled) return;
         if (signal.aborted || result.cancelled) {
           finish(signal.aborted ? abortError(signal) : new DOMException('응답 생성을 중단했습니다.', 'AbortError'));

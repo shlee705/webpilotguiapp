@@ -57,7 +57,7 @@ test('unavailable OS encryption keeps the key in memory only', () => {
   assert.equal(publicSettings.storage, 'session');
   assert.equal(fixture.settings.getKey(), KEY);
   const saved = JSON.parse(fs.readFileSync(path.join(fixture.directory, 'ai-settings.json'), 'utf8'));
-  assert.equal(saved.encryptedKey, '');
+  assert.equal(saved.profiles.openai.encryptedKey, '');
   assert.equal(createAiSettings(fixture).get().keyConfigured, false);
 });
 
@@ -156,18 +156,56 @@ test('shutdown waits for cancellation usage accounting to finish', async () => {
   assert.equal((await second).cancelled, true);
 });
 
-test('connection check uses only free model listing and does not save its temporary key', async () => {
+test('backend termination failure survives cancellation for a native shutdown notification', async () => {
+  const fixture = serviceFixture(async () => { throw new Error('API must not run'); }, {
+    siteAgent: async ({ signal }) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => {
+        const error = new Error('private process diagnostic');
+        error.name = 'BackendTerminationError';
+        reject(error);
+      }, { once: true });
+    }),
+  });
+  const pending = fixture.service.start({ ...request(), targetUrl: 'https://example.test/' }, () => {});
+  fixture.service.cancel('request-1');
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(result.terminationFailure, true);
+  assert.equal(result.cancelled, undefined);
+  assert.match(result.error, /종료를 확인하지 못/);
+  assert.equal(result.error.includes('private process'), false);
+});
+
+test('connection check uses only free model metadata and does not save its temporary key', async () => {
   let called;
   const fixture = serviceFixture(async (url, options) => {
     called = { url, options };
-    return Response.json({ data: [{ id: 'gpt-6-luna' }] });
+    return Response.json({ id: 'gpt-6-luna' });
   });
   const result = await fixture.service.testConnection({ model: 'gpt-6-luna', apiKey: 'sk-temporary-check-key' });
   assert.equal(result.ok, true);
-  assert.equal(called.url, 'https://api.openai.com/v1/models');
+  assert.equal(called.url, 'https://api.openai.com/v1/models/gpt-6-luna');
+  assert.equal(called.options.redirect, 'error');
   assert.equal(called.options.body, undefined);
   assert.equal(fixture.settings.getKey(), KEY);
   assert.equal(fixture.settings.get().usage.requests, 0);
+});
+
+test('failed usage persistence cannot hide a backend termination failure', async () => {
+  const fixture = serviceFixture(async () => assert.fail('No chat request expected'), {
+    siteAgent: async ({ onUsage }) => {
+      onUsage({ inputTokens: 1, outputTokens: 2, totalTokens: 3 });
+      const error = new Error('private termination details');
+      error.name = 'BackendTerminationError';
+      throw error;
+    },
+  });
+  fixture.settings.recordUsage = () => { throw new Error('Disk unavailable'); };
+  const result = await fixture.service.start({ ...request(), targetUrl: 'https://example.test/' }, () => {});
+  assert.equal(result.ok, false);
+  assert.equal(result.terminationFailure, true);
+  assert.match(result.error, /종료를 확인하지 못/);
+  assert.doesNotMatch(result.error, /private termination/);
 });
 
 test('renderer cannot inject developer messages or start requests without an API key', async () => {
@@ -195,7 +233,7 @@ test('site loop accounts each API request once and emits cumulative usage', asyn
   assert.deepEqual(await service.start({ ...request(), targetUrl: 'https://example.com/' }, event => events.push(event)), { ok: true });
   assert.equal(inputs.apiKey, KEY);
   assert.equal(inputs.messages[0].role, 'user');
-  assert.equal(inputs.maxActions, 5);
+  assert.equal(Object.hasOwn(inputs, 'maxActions'), false);
   assert.deepEqual(events.filter(event => event.type === 'usage').at(-1).usage, { inputTokens: 30, outputTokens: 11, totalTokens: 41 });
   assert.equal(settings.get().usage.requests, 3);
   assert.equal(settings.get().usage.untrackedRequests, 1);
@@ -219,22 +257,53 @@ test('site runs forward only the current task while still validating all supplie
   assert.equal(received.length, 1);
 });
 
-test('per-run action limit is validated before work and forwarded without coercion', async () => {
+test('site requests validate dedicated backend parameters and scrub only their explicit task before orchestration', async () => {
+  const received = [];
+  const fixture = serviceFixture(async () => assert.fail('No paid endpoint expected'), {
+    siteAgent: async options => { received.push(options); },
+  });
+  const credentials = { username: 'secret-backend-user', password: 'secret-backend-pass' };
+  const base = { ...request(), targetUrl: 'https://example.test/', credentials,
+    backendOptions: { provider: 'anthropic', models: { plan: 'claude-sonnet-5-5', triage: 'claude-haiku-5-5' }, budgetUsd: 1.5 },
+    backendTask: `로그인 후 검색 ${credentials.username} ${credentials.password}` };
+  assert.equal((await fixture.service.start(base, () => {})).ok, true);
+  assert.equal(received[0].backendOptions.budgetUsd, 1.5);
+  assert.equal(received[0].backendOptions.provider, 'anthropic');
+  assert.equal(received[0].provider, 'openai');
+  assert.equal(received[0].backendTask.includes(credentials.password), false);
+  assert.equal(received[0].backendTask.includes(credentials.username), false);
+  for (const input of [{ ...base, backendOptions: { apiKey: 'injected' } }, { ...base, backendTask: '' },
+    { ...base, targetUrl: undefined }, { ...base, backendOptions: { workers: 9 } }]) {
+    assert.equal((await fixture.service.start(input, () => {})).ok, false);
+  }
+  assert.equal(received.length, 1);
+});
+
+test('backend login URL is validated before orchestration and never calls a paid endpoint', async () => {
+  const received = [];
+  const fixture = serviceFixture(async () => assert.fail('No paid endpoint expected'), { siteAgent: async options => { received.push(options); } });
+  const credentials = { username: 'private-login-user', password: 'private-login-password' };
+  const base = { ...request(), targetUrl: 'https://example.test/', credentials, backendLoginUrl: 'https://example.test/login' };
+  assert.equal((await fixture.service.start(base, () => {})).ok, true);
+  assert.equal(received[0].backendLoginUrl, base.backendLoginUrl);
+  assert.deepEqual(received[0].credentials, credentials);
+  for (const input of [{ ...base, credentials: undefined }, { ...base, backendLoginUrl: 'https://other.test/login' },
+    { ...base, backendLoginUrl: `https://example.test/?password=${credentials.password}` }]) assert.equal((await fixture.service.start(input, () => {})).ok, false);
+  assert.equal(received.length, 1);
+});
+
+test('legacy action counts are ignored and never forwarded to desktop inspection', async () => {
   const runs = [];
   const { service, settings } = serviceFixture(async () => assert.fail('No normal API request expected'), {
-    siteAgent: async options => { runs.push(options.maxActions); },
+    siteAgent: async options => { runs.push(options); },
   });
   const base = { ...request(), targetUrl: 'https://example.com/' };
-  assert.equal((await service.start({ ...base, maxActions: 2 }, () => {})).ok, true);
-  assert.equal((await service.start({ ...base, maxActions: 6 }, () => {})).ok, true);
-  assert.equal((await service.start({ ...base, maxActions: Number.MAX_SAFE_INTEGER }, () => {})).ok, true);
-  assert.deepEqual(runs, [2, 6, Number.MAX_SAFE_INTEGER]);
-  for (const maxActions of [0, -3, 2.5, '3', null, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+  for (const maxActions of [undefined, 1, 6, Number.MAX_SAFE_INTEGER, 0, -3, 2.5, '3', null, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
     const result = await service.start({ ...base, maxActions }, () => {});
-    assert.equal(result.ok, false);
-    assert.match(result.error, /1 이상/);
+    assert.equal(result.ok, true);
   }
-  assert.deepEqual(runs, [2, 6, Number.MAX_SAFE_INTEGER]);
+  assert.equal(runs.length, 12);
+  assert.ok(runs.every(options => !Object.hasOwn(options, 'maxActions')));
   assert.equal(settings.get().usage.requests, 0);
 });
 
@@ -343,6 +412,6 @@ test('site runs have no whole-run timeout and receive request timeouts plus repo
   const result = await fixture.service.start({ ...request(), targetUrl: 'https://example.com/', maxActions: 100 }, () => {});
   assert.equal(result.ok, true);
   assert.equal(supplied.requestTimeoutMs, 5);
-  assert.equal(supplied.maxActions, 100);
+  assert.equal(Object.hasOwn(supplied, 'maxActions'), false);
   assert.equal(supplied.reportProvider, reportProvider);
 });

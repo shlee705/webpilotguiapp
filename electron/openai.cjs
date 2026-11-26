@@ -1,5 +1,7 @@
-const { validateModel, validateKey } = require('./ai-settings.cjs');
+const { validateProvider, validateModel, validateKey } = require('./ai-settings.cjs');
+const { validateBackendRunOptions, validateBackendTask, validateBackendLoginUrl } = require('./backend-run-options.cjs');
 const { validateCredentials, createSecretRedactor } = require('./login-secrets.cjs');
+const { ANTHROPIC_API, anthropicHeaders, anthropicRequest, normalizeAnthropicUsage, anthropicError, isTransientAnthropicError } = require('./anthropic.cjs');
 
 const DEVELOPER_INSTRUCTION = '당신은 WebPilot의 웹 테스트 도우미입니다. 사용자에게 한국어로 명료하게 답하세요. 현재 이 대화에는 브라우저 제어, 웹 검색, 화면 캡처, 사이트 방문 또는 실제 테스트 실행 도구가 없습니다. URL을 전달받아도 사이트의 내용을 읽었거나 탐색하거나 버그를 발견했다고 주장하지 마세요. 앱이 Edge에서 URL을 여는 기능과 실제 사이트 검사는 별개입니다. 사용자가 제공한 텍스트, 코드, 관찰 결과를 근거로 분석하고, 확인하지 못한 사항은 구분해서 설명하세요. 필요한 경우 테스트 절차나 추가로 필요한 정보를 제안하세요.';
 
@@ -41,7 +43,7 @@ async function retryResponse(operation, { signal, timeoutMs = 60000, retryDelayM
       failure = controller.signal.reason === 'response-timeout'
         ? new ResponseError('응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.', true)
         : error instanceof TypeError
-          ? new ResponseError('OpenAI에 연결할 수 없습니다. 네트워크를 확인해 주세요.', true)
+          ? new ResponseError('선택한 AI 서비스에 연결할 수 없습니다. 네트워크를 확인해 주세요.', true)
           : error;
     } finally {
       clearTimeout(timeout);
@@ -124,18 +126,27 @@ function createOpenAiService({ settings, fetchImpl = fetch, now = () => new Date
     let key;
     let model;
     try {
-      key = input.apiKey?.trim() ? validateKey(input.apiKey) : settings.getKey();
-      model = validateModel(input.model ?? settings.get().model);
-      if (!key) return { ok: false, error: 'OpenAI API 키를 입력해 주세요.' };
-      const response = await fetchImpl('https://api.openai.com/v1/models', { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15000) });
+      const provider = validateProvider(input.provider ?? settings.get().provider ?? 'openai');
+      key = input.apiKey?.trim() ? validateKey(input.apiKey, provider) : settings.getKey(provider);
+      model = validateModel(input.model ?? settings.get(provider).model);
+      if (!key) return { ok: false, error: `${provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API 키를 입력해 주세요.` };
+      // Metadata retrieval is free and accepts provider model aliases. Never send
+      // keys through a redirect or fall back to another provider's saved key.
+      // https://developers.openai.com/api/reference/resources/models/methods/retrieve
+      const endpoint = provider === 'anthropic' ? ANTHROPIC_API : 'https://api.openai.com/v1';
+      const response = await fetchImpl(`${endpoint}/models/${encodeURIComponent(model)}`, {
+        headers: provider === 'anthropic' ? anthropicHeaders(key) : { Authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(15000), redirect: 'error',
+      });
       if (!response.ok) {
         let error;
         try { error = await response.json(); } catch { /* Use the HTTP status only. */ }
-        return { ok: false, error: apiError(response.status, error?.error?.code) };
+        return { ok: false, error: provider === 'anthropic' ? anthropicError(response.status, error?.error?.type) : apiError(response.status, error?.error?.code) };
       }
       const body = await response.json();
-      const models = Array.isArray(body.data) ? body.data.map(entry => entry?.id).filter(id => typeof id === 'string').sort() : [];
-      return models.includes(model) ? { ok: true, models } : { ok: false, error: 'API 키는 연결되었지만 선택한 모델을 사용할 수 없습니다. 다른 모델을 선택해 주세요.', models };
+      return typeof body?.id === 'string' && body.id.trim()
+        ? { ok: true, models: [...new Set([model, body.id])] }
+        : { ok: false, error: '선택한 모델의 정보를 확인하지 못했습니다. 모델 이름을 확인해 주세요.' };
     } catch (error) {
       return { ok: false, error: error.name === 'TimeoutError' ? '연결 확인 시간이 초과되었습니다.' : '연결을 확인할 수 없습니다. 네트워크와 API 키를 확인해 주세요.' };
     }
@@ -144,15 +155,19 @@ function createOpenAiService({ settings, fetchImpl = fetch, now = () => new Date
   async function start(input, emit) {
     let key;
     let model;
+    let provider;
     let messages;
-    let maxActions;
     let credentials;
+    let backendOptions;
+    let backendTask;
+    let backendLoginUrl;
     let redact = value => value;
     try {
       if (!input || typeof input.requestId !== 'string' || !input.requestId || input.requestId.length > 128) throw new Error('올바른 요청 ID가 필요합니다.');
       if (active.has(input.requestId)) throw new Error('같은 요청이 이미 실행 중입니다.');
       if (active.size >= 8) throw new Error('동시 요청이 너무 많습니다. 진행 중인 응답을 기다려 주세요.');
-      model = validateModel(input.model ?? settings.get().model);
+      provider = validateProvider(input.provider ?? settings.get().provider ?? 'openai');
+      model = validateModel(input.model ?? settings.get(provider).model);
       credentials = validateCredentials(input.credentials);
       redact = createSecretRedactor(credentials);
       messages = requestMessages(input.messages);
@@ -164,10 +179,16 @@ function createOpenAiService({ settings, fetchImpl = fetch, now = () => new Date
         messages = [messages[0], task];
       }
       messages = messages.map((message, index) => index === 0 ? message : { ...message, content: redact(message.content) });
-      maxActions = validateMaxActions(input.maxActions);
+      if (input.backendOptions !== undefined || input.backendTask !== undefined) {
+        if (!(typeof input.targetUrl === 'string' && input.targetUrl)) throw new Error('백엔드 테스트 설정은 사이트 검사에서만 사용할 수 있습니다.');
+        backendOptions = validateBackendRunOptions(input.backendOptions);
+        const task = validateBackendTask(input.backendTask);
+        backendTask = task === undefined ? undefined : redact(task);
+      }
       if (credentials && !(typeof input.targetUrl === 'string' && input.targetUrl)) throw new Error('로그인 정보는 사이트 버그 탐색 요청에서만 사용할 수 있습니다.');
-      key = settings.getKey();
-      if (!key) throw new Error('설정에서 OpenAI API 키를 먼저 입력해 주세요.');
+      backendLoginUrl = validateBackendLoginUrl(input.backendLoginUrl, input.targetUrl, credentials);
+      key = settings.getKey(provider);
+      if (!key) throw new Error(`설정에서 ${provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API 키를 먼저 입력해 주세요.`);
     } catch (error) { return { ok: false, error: error.message }; }
     const controller = new AbortController();
     let resolveFinished;
@@ -185,7 +206,7 @@ function createOpenAiService({ settings, fetchImpl = fetch, now = () => new Date
       try { emit(safeEvent); } catch { /* Renderer may have closed. */ }
     }
     const recordRequestUsage = (requestUsage, requestedAt = now()) => {
-      try { settings.recordUsage(requestUsage, requestedAt); } catch { accountingError = true; }
+      try { settings.recordUsage(requestUsage, requestedAt, provider); } catch { accountingError = true; }
       if (requestUsage) {
         cumulative.inputTokens += requestUsage.inputTokens;
         cumulative.outputTokens += requestUsage.outputTokens;
@@ -194,16 +215,19 @@ function createOpenAiService({ settings, fetchImpl = fetch, now = () => new Date
       }
     };
     try {
-      publish({ type: 'status', id: 'openai-response', label: 'OpenAI가 응답을 생성하고 있습니다', state: 'running' });
+      publish({ type: 'status', id: `${provider}-response`, label: `${provider === 'anthropic' ? 'Claude' : 'OpenAI'}가 응답을 생성하고 있습니다`, state: 'running' });
       if (siteMode) {
         const runSiteAgent = siteAgent ?? require('./site-agent.cjs').runSiteAgent;
         await runSiteAgent({
           apiKey: key,
           model,
+          provider,
           messages: messages.slice(1),
           targetUrl: input.targetUrl,
-          maxActions,
           credentials,
+          ...(backendOptions ? { backendOptions } : {}),
+          ...(backendTask !== undefined ? { backendTask } : {}),
+          ...(backendLoginUrl !== undefined ? { backendLoginUrl } : {}),
           reportProvider,
           fetchImpl,
           requestTimeoutMs: timeoutMs,
@@ -212,6 +236,56 @@ function createOpenAiService({ settings, fetchImpl = fetch, now = () => new Date
           onEvent: publish,
           onUsage: recordRequestUsage,
         });
+      } else if (provider === 'anthropic') {
+        let visibleOutput = false;
+        await retryResponse(async requestSignal => {
+          const requestedAt = now();
+          let usageFields, stopReason, completed = false, finalUsageReceived = false;
+          try {
+            const response = await fetchImpl(`${ANTHROPIC_API}/messages`, {
+              method: 'POST', headers: anthropicHeaders(key), redirect: 'error', signal: requestSignal,
+              body: JSON.stringify(anthropicRequest({ model, messages, stream: true })),
+            });
+            if (!response.ok) {
+              let body;
+              try { body = await response.json(); } catch { /* Only expose sanitized status. */ }
+              usageFields = body?.usage;
+              finalUsageReceived = Boolean(usageFields);
+              throw new ResponseError(anthropicError(response.status, body?.error?.type), isTransientHttp(response.status, body?.error?.type));
+            }
+            for await (const data of readSse(response.body)) {
+              controller.signal.throwIfAborted();
+              let event;
+              try { event = JSON.parse(data); } catch { throw new ResponseError('Claude 응답 형식을 읽을 수 없습니다.', true); }
+              if (event.type === 'message_start') {
+                usageFields = event.message?.usage;
+              } else if (event.type === 'message_delta') {
+                // message_delta usage is cumulative: replace present counters,
+                // preserving initial input/cache counters that may be omitted.
+                if (event.usage) usageFields = { ...usageFields, ...event.usage };
+                if (event.delta?.stop_reason) {
+                  stopReason = event.delta.stop_reason;
+                  finalUsageReceived = Number.isSafeInteger(event.usage?.output_tokens) && event.usage.output_tokens >= 0;
+                }
+              } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta'
+                || event.type === 'content_block_start' && event.content_block?.type === 'text') {
+                const value = event.type === 'content_block_delta' ? event.delta.text : event.content_block.text;
+                if (typeof value === 'string' && value) { visibleOutput = true; publish({ type: 'delta', text: value }); }
+              } else if (event.type === 'error') {
+                throw new ResponseError(anthropicError(400, event.error?.type), isTransientAnthropicError(event.error?.type));
+              } else if (event.type === 'message_stop') {
+                completed = true;
+                break;
+              }
+            }
+            if (!completed) throw new ResponseError('Claude 응답 연결이 완료 전에 끊겼습니다. 다시 시도해 주세요.', true);
+            if (stopReason !== 'end_turn') throw new ResponseError(stopReason === 'refusal'
+              ? 'Claude가 요청을 거절했습니다. 요청 내용을 확인해 주세요.'
+              : 'Claude 응답이 끝까지 생성되지 않았습니다. 표시된 내용을 확인하고 다시 요청해 주세요.', stopReason === 'max_tokens');
+            if (!visibleOutput) throw new ResponseError('Claude가 빈 응답을 반환했습니다. 다시 시도해 주세요.', true);
+          } finally { recordRequestUsage(finalUsageReceived ? normalizeAnthropicUsage(usageFields) : undefined, requestedAt); }
+        }, { signal: controller.signal, timeoutMs, retryDelayMs, canRetry: () => !visibleOutput,
+          onRetry: retry => publish({ type: 'status', id: 'anthropic-retry', label: `일시적인 응답 오류로 다시 연결하고 있습니다 (${retry}/2)`, state: 'running' }) });
       } else {
       let visibleOutput = false;
       await retryResponse(async requestSignal => {
@@ -224,6 +298,7 @@ function createOpenAiService({ settings, fetchImpl = fetch, now = () => new Date
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: JSON.stringify({ model, input: messages, stream: true, store: false }),
         signal: requestSignal,
+        redirect: 'error',
       });
       if (!response.ok) {
         let error;
@@ -259,18 +334,20 @@ function createOpenAiService({ settings, fetchImpl = fetch, now = () => new Date
       if (controller.signal.aborted) throw new Error('cancelled');
       result = { ok: true };
     } catch (error) {
-      result = controller.signal.aborted
+      result = error.name === 'BackendTerminationError'
+        ? { ok: false, error: '백엔드 프로세스 종료를 확인하지 못했습니다. 새 검사를 시작하기 전에 작업 관리자에서 해당 검사 프로세스를 확인해 주세요.', terminationFailure: true }
+        : controller.signal.aborted
         ? controller.signal.reason === 'timeout'
           ? { ok: false, error: '응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' }
           : { ok: false, cancelled: true }
-        : { ok: false, error: error instanceof TypeError ? 'OpenAI에 연결할 수 없습니다. 네트워크를 확인해 주세요.' : redact(error.message) };
+        : { ok: false, error: error instanceof TypeError ? '선택한 AI 서비스에 연결할 수 없습니다. 네트워크를 확인해 주세요.' : redact(error.message) };
     } finally {
-      if (accountingError) result = { ok: false, error: '응답 사용량을 저장하지 못했습니다. 저장 공간을 확인해 주세요.' };
+      if (accountingError && !result?.terminationFailure) result = { ok: false, error: '응답 사용량을 저장하지 못했습니다. 저장 공간을 확인해 주세요.' };
       active.delete(input.requestId);
       resolveFinished();
     }
     if (result.ok) {
-      publish({ type: 'status', id: 'openai-response', label: 'OpenAI 응답 완료', state: 'complete' });
+      publish({ type: 'status', id: `${provider}-response`, label: `${provider === 'anthropic' ? 'Claude' : 'OpenAI'} 응답 완료`, state: 'complete' });
       publish({ type: 'done' });
     }
     return result;
@@ -289,4 +366,4 @@ function createOpenAiService({ settings, fetchImpl = fetch, now = () => new Date
   };
 }
 
-module.exports = { createOpenAiService, normalizeUsage, requestMessages, readSse, apiError, validateMaxActions, ResponseError, isTransientHttp, retryResponse, abortableDelay };
+module.exports = { createOpenAiService, createAiService: createOpenAiService, normalizeUsage, requestMessages, readSse, apiError, validateMaxActions, ResponseError, isTransientHttp, retryResponse, abortableDelay };

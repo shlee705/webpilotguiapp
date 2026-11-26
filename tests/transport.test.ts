@@ -2,10 +2,10 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { sendChat } from '../src/lib/transport';
 import { createMessage } from '../src/lib/storage';
-import { DEFAULT_MODEL, type AgentEvent, type LoginCredentials, type MessageRole } from '../src/types';
+import { DEFAULT_MODEL, type AgentEvent, type ApiProvider, type BackendRunOptions, type LoginCredentials, type MessageRole } from '../src/types';
 
 type Envelope = { requestId: string; event: AgentEvent };
-type Request = { requestId: string; messages: { role: MessageRole; content: string }[]; model: string; targetUrl?: string; maxActions?: number; credentials?: LoginCredentials };
+type Request = { requestId: string; messages: { role: MessageRole; content: string }[]; provider?: ApiProvider; model: string; targetUrl?: string; backendTask?: string; backendOptions?: BackendRunOptions; backendLoginUrl?: string; credentials?: LoginCredentials };
 type Result = { ok: boolean; error?: string; cancelled?: boolean };
 
 beforeEach(() => {
@@ -48,6 +48,22 @@ test('browser preview rejects without a native bridge and never supplies demo ou
   assert.deepEqual(events, []);
 });
 
+test('backend login routes accounts through the dedicated transient field and rejects incompatible URLs', async () => {
+  const mock = bridge();
+  const credentials = { username: 'login-user-488', password: 'login-secret-299' };
+  const input = { ...options(), targetUrl: 'https://example.test/', backendTask: '로그인 이후 페이지 검사', credentials, backendLoginUrl: 'https://example.test/login' };
+  await sendChat(input);
+  assert.equal(mock.requests[0].backendLoginUrl, input.backendLoginUrl);
+  assert.deepEqual(mock.requests[0].credentials, credentials);
+  assert.equal(JSON.stringify(mock.requests[0].messages).includes(credentials.password), false);
+  assert.equal(mock.requests[0].backendTask, input.backendTask);
+  await assert.rejects(sendChat({ ...input, backendLoginUrl: 'https://other.test/login' }), /동일한 출처/);
+  await assert.rejects(sendChat({ ...input, credentials: undefined }), /계정을 함께/);
+  await assert.rejects(sendChat({ ...input, backendLoginUrl: undefined, targetUrl: 'https://example.test/?account=login-user-488' }), /계정 정보를 포함/);
+  await assert.rejects(sendChat({ ...input, backendLoginUrl: 'https://example.test/login?token=login-secret-299' }), /계정 정보를 포함/);
+  assert.equal(mock.requests.length, 1);
+});
+
 test('subscribes before native launch, sends only actual conversation content and forwards usage', async () => {
   const events: AgentEvent[] = [];
   const mock = bridge(async (request) => {
@@ -64,8 +80,23 @@ test('subscribes before native launch, sends only actual conversation content an
   await sendChat(request);
   assert.deepEqual(mock.requests[0].messages, [{ role: 'user', content: '안녕하세요' }]);
   assert.equal(mock.requests[0].model, DEFAULT_MODEL);
+  assert.equal(mock.requests[0].provider, 'openai');
   assert.deepEqual(events.map((event) => event.type), ['delta', 'usage', 'done']);
   assert.equal(mock.listeners.size, 0);
+});
+
+test('routes an explicit Claude provider and keeps its actual prior responses in context', async () => {
+  const mock = bridge();
+  const request = options();
+  request.messages.push({ ...createMessage('assistant', 'Claude prior output'), source: 'anthropic', provider: 'anthropic', model: 'claude-sonnet-5-5' });
+  request.messages.push(createMessage('user', '다음 화면을 봐 줘'));
+  await sendChat({ ...request, provider: 'anthropic', model: 'claude-sonnet-5-5' });
+  assert.equal(mock.requests[0].provider, 'anthropic');
+  assert.equal(mock.requests[0].model, 'claude-sonnet-5-5');
+  assert.deepEqual(mock.requests[0].messages[1], { role: 'assistant', content: 'Claude prior output' });
+  assert.equal(Object.hasOwn(mock.requests[0], 'apiKey'), false);
+  await assert.rejects(sendChat({ ...options(), provider: 'unknown' as ApiProvider }), /제공자/);
+  assert.equal(mock.requests.length, 1);
 });
 
 test('isolates simultaneous requests in the same conversation and removes each listener', async () => {
@@ -186,16 +217,16 @@ test('forwards native screenshot metadata without fetching image bytes in the tr
   assert.deepEqual(events, [{ type: 'screenshot', capture }, { type: 'done' }]);
 });
 
-test('forwards action limit and all native activity phases for a started tour', async () => {
+test('forwards all native activity phases without sending a visual action quota', async () => {
   const events: AgentEvent[] = [];
   const mock = bridge(async (request) => {
-    assert.equal(request.maxActions, 3);
+    assert.equal('maxActions' in request, false);
     for (const phase of ['reading', 'thinking', 'acting', 'finalizing', 'complete'] as const) {
       mock.emit({ requestId: request.requestId, event: { type: 'activity', phase, visitedCount: 4, actionCount: 3, url: 'https://example.com/' } });
     }
     return { ok: true };
   });
-  await sendChat({ ...options(events), targetUrl: 'https://example.com/', maxActions: 3 });
+  await sendChat({ ...options(events), targetUrl: 'https://example.com/' });
   assert.deepEqual(events.filter(event => event.type === 'activity').map(event => event.phase), ['reading', 'thinking', 'acting', 'finalizing', 'complete']);
   assert.equal(events.at(-1)?.type, 'done');
 });
@@ -228,18 +259,21 @@ test('rejects invalid credentials and credential use without a target site befor
   assert.equal(mock.requests.length, 0);
 });
 
-test('rejects invalid action limits and malformed model IDs before native launch', async () => {
+test('rejects malformed model IDs before native launch', async () => {
   const mock = bridge();
-  for (const maxActions of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) await assert.rejects(sendChat({ ...options(), maxActions }), /양의 정수/);
   await assert.rejects(sendChat({ ...options(), model: 'invalid model' }), /모델/);
   assert.equal(mock.requests.length, 0);
   assert.equal(mock.listeners.size, 0);
 });
 
-test('forwards large safe action limits without imposing the previous five-action cap', async () => {
+test('legacy runtime action quotas are ignored and never reach native execution', async () => {
   const mock = bridge();
-  for (const maxActions of [6, 250, Number.MAX_SAFE_INTEGER]) await sendChat({ ...options(), targetUrl: 'https://example.com/', maxActions });
-  assert.deepEqual(mock.requests.map(request => request.maxActions), [6, 250, Number.MAX_SAFE_INTEGER]);
+  for (const maxActions of [1, 250, 0, -1, 'legacy', null]) {
+    const legacy = { ...options(), targetUrl: 'https://example.com/', maxActions };
+    await sendChat(legacy);
+  }
+  assert.equal(mock.requests.length, 6);
+  assert.ok(mock.requests.every(request => !('maxActions' in request)));
 });
 
 test('forwards validated report metadata, ignores invalid reports and accepts final report after done', async () => {
@@ -277,7 +311,7 @@ test('matching activity resets inactivity timeout so long runs have no overall f
   const pending = deferred<Result>();
   const mock = bridge(() => pending.promise);
   let failure: unknown;
-  const call = sendChat({ ...options(), maxActions: 100, inactivityTimeoutMs: 50 }).catch(error => { failure = error; });
+  const call = sendChat({ ...options(), inactivityTimeoutMs: 50 }).catch(error => { failure = error; });
   const { requestId } = mock.requests[0];
   for (let count = 0; count < 4; count += 1) {
     await new Promise(resolve => setTimeout(resolve, 25));
@@ -307,4 +341,24 @@ test('successful native completion clears the watchdog even without a done event
   await new Promise(resolve => setTimeout(resolve, 40));
   assert.deepEqual(events, [{ type: 'done' }]);
   assert.deepEqual(mock.cancelled, []);
+});
+test('backend task and options reach native execution separately from the visual model and secrets', async () => {
+  const mock = bridge(async () => ({ ok: true }));
+  const base = options();
+  await sendChat({ ...base, targetUrl: 'https://example.com/',
+    backendOptions: { provider: 'anthropic', models: { plan: 'claude-opus-5-5', triage: 'claude-sonnet-5-5' }, budgetUsd: 2.5, maxPages: 7 },
+    backendTask: '검색 기능 확인\nid: transient-user\npassword: transient-pass',
+  });
+  const request = mock.requests[0];
+  assert.equal(request.provider, 'openai');
+  assert.equal(request.model, DEFAULT_MODEL);
+  assert.equal('maxActions' in request, false);
+  assert.equal(request.backendOptions?.provider, 'anthropic');
+  assert.equal(request.backendOptions?.budgetUsd, 2.5);
+  assert.equal(request.backendOptions?.maxPages, 7);
+  assert.match(request.backendTask ?? '', /^검색 기능 확인/);
+  assert.equal(JSON.stringify(request.backendOptions).includes('transient'), false);
+  assert.equal(JSON.stringify(request).includes('transient-pass'), false);
+  await assert.rejects(sendChat({ ...base, targetUrl: 'https://example.com/', backendOptions: { apiKey: 'unwanted' } as any }), /허용되지/);
+  assert.equal(mock.requests.length, 1);
 });

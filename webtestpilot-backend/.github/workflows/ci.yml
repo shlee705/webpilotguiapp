@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, development]
+  push:
+    branches: [main, development]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  branch-policy:
+    name: Branch policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check release source
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        env:
+          SOURCE_BRANCH: ${{ github.head_ref }}
+          SOURCE_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          if [ "$SOURCE_BRANCH" != "development" ] || [ "$SOURCE_REPO" != "$TARGET_REPO" ]; then
+            echo "main PRs must come from this repository's development branch."
+            exit 1
+          fi
+
+  qa-tests:
+    name: QA tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          # qa는 TypeScript를 Node가 바로 실행한다(타입 제거). 개발 환경과 같은 24를 쓴다.
+          node-version: '24'
+      # Playwright는 저장소 루트 package.json에 있고, qa는 Claude SDK·MCP SDK를 자기 package.json에 둔다.
+      - name: Install dependencies
+        run: npm ci && npm ci --prefix qa
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+      - name: Type check
+        run: npx --prefix qa tsc -p qa --noEmit
+      # 무료 테스트만 돈다(로컬 fixture 서버와 가짜 모델). 유료 API는 부르지 않는다.
+      - name: Run tests
+        run: npm test --prefix qa

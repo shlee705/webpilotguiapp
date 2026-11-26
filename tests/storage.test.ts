@@ -55,6 +55,24 @@ test('preserves actual model and token usage and labels older assistant history 
   assert.equal(messages[2].source, undefined);
 });
 
+test('preserves Claude provider on messages and plans without reclassifying old OpenAI history', () => {
+  const conversation = createConversation('Provider history');
+  conversation.messages = [
+    { ...createMessage('assistant', 'Claude output'), provider: 'anthropic', source: 'anthropic', model: 'claude-opus-5-5' },
+    { ...createMessage('assistant', 'Claude plan'), source: 'local', plan: { provider: 'anthropic', targetUrl: 'https://example.com/', prompt: '탐색', model: 'claude-sonnet-5-5', state: 'pending' } },
+    { ...createMessage('assistant', 'Existing API output'), source: 'openai', model: 'gpt-6-luna' },
+  ];
+  assert.equal(saveConversations([conversation]), true);
+  const messages = loadConversations()[0].messages;
+  assert.equal(messages[0].provider, 'anthropic');
+  assert.equal(messages[0].source, 'anthropic');
+  assert.equal(messages[1].plan?.provider, 'anthropic');
+  assert.equal(messages[1].plan?.model, 'claude-sonnet-5-5');
+  assert.equal(messages[1].source, 'local');
+  assert.equal(messages[2].provider ?? 'openai', 'openai');
+  assert.equal(messages[2].source, 'openai');
+});
+
 test('drops invalid token metadata without discarding message text', () => {
   const conversation = createConversation('AI');
   const message = createMessage('assistant', 'preserved');
@@ -108,7 +126,7 @@ test('persists screenshot metadata without image data and rejects malformed capt
   assert.equal(values.get('webpilot.conversations.v1')?.includes('SECRET_IMAGE_BYTES'), false);
 });
 
-test('preserves a pending local tour plan and defaults an omitted action limit to five', () => {
+test('preserves a pending local tour plan without adding a visual action quota', () => {
   const conversation = createConversation('Plan');
   const message = { ...createMessage('assistant', '사이트 탐색 계획'), source: 'local' };
   const plan = { targetUrl: 'https://example.com', prompt: '메뉴를 살펴봐 줘', model: 'gpt-6-luna', state: 'pending' };
@@ -116,7 +134,8 @@ test('preserves a pending local tour plan and defaults an omitted action limit t
   const restored = loadConversations()[0].messages[0];
   assert.equal(restored.source, 'local');
   assert.equal(restored.model, undefined);
-  assert.deepEqual(restored.plan, { ...plan, targetUrl: 'https://example.com/', maxActions: 5 });
+  assert.deepEqual(restored.plan, { ...plan, targetUrl: 'https://example.com/' });
+  assert.equal(restored.plan?.provider ?? 'openai', 'openai');
   assert.equal(restored.status, 'complete');
 });
 
@@ -124,7 +143,7 @@ test('saving keeps a running plan active, but restarting restores it as cancelle
   const conversation = createConversation('Interrupted plan');
   conversation.messages = [{
     ...createMessage('assistant', '계획 실행 중'), source: 'local',
-    plan: { targetUrl: 'http://localhost:3000/', prompt: '메뉴 탐색', model: 'gpt-6-luna', maxActions: 3, state: 'running' },
+    plan: { targetUrl: 'http://localhost:3000/', prompt: '메뉴 탐색', model: 'gpt-6-luna', state: 'running' },
     activity: { phase: 'finalizing', visitedCount: 4, actionCount: 3, url: 'http://localhost:3000/page' },
   }];
   saveConversations([conversation]);
@@ -139,7 +158,7 @@ test('completed plan, completed activity and screenshot metadata survive togethe
   const conversation = createConversation('Completed plan');
   conversation.messages = [{
     ...createMessage('assistant', '탐색 완료'), source: 'openai', model: 'gpt-6-luna',
-    plan: { targetUrl: 'https://example.com/', prompt: '메뉴 탐색', model: 'gpt-6-luna', maxActions: 5, state: 'complete' },
+    plan: { targetUrl: 'https://example.com/', prompt: '메뉴 탐색', model: 'gpt-6-luna', state: 'complete' },
     activity: { phase: 'complete', visitedCount: 6, actionCount: 5, url: 'https://example.com/page' },
     captures: [{ id: 'capture-finished', index: 6, url: 'https://example.com/page', createdAt: new Date().toISOString() }],
   }];
@@ -147,12 +166,12 @@ test('completed plan, completed activity and screenshot metadata survive togethe
   assert.deepEqual(loadConversations()[0].messages[0], conversation.messages[0]);
 });
 
-test('rejects malformed plan URL, state, model and action limit without losing history', () => {
+test('rejects malformed plan URL, state and model without losing history', () => {
   const conversation = createConversation('Invalid plans');
-  const validPlan = { targetUrl: 'https://example.com/', prompt: '메뉴 탐색', model: 'gpt-6-luna', maxActions: 5, state: 'pending' };
+  const validPlan = { targetUrl: 'https://example.com/', prompt: '메뉴 탐색', model: 'gpt-6-luna', state: 'pending' };
   const invalidParts = [
     { targetUrl: 'javascript:alert(1)' }, { targetUrl: 'https://user:pass@example.com/' }, { targetUrl: 'https://example.com/\npath' },
-    { state: 'unknown' }, { model: ' ' }, { model: 'model name' }, { maxActions: 0 }, { maxActions: Number.MAX_SAFE_INTEGER + 1 }, { maxActions: -1 }, { maxActions: 1.5 }, { prompt: '' },
+    { state: 'unknown' }, { provider: 'unknown' }, { model: ' ' }, { model: 'model name' }, { prompt: '' },
   ];
   const messages = invalidParts.map((part, index) => ({ ...createMessage('assistant', `preserved ${index}`), source: 'local', plan: { ...validPlan, ...part } }));
   values.set('webpilot.conversations.v1', JSON.stringify([{ ...conversation, messages }]));
@@ -183,7 +202,7 @@ test('credential objects and assigned secrets are never persisted in messages or
   const prompt = '로그인해 줘\nid: account-744\npassword: secret-388';
   conversation.messages = [{
     ...createMessage('assistant', prompt), source: 'local', credentials,
-    plan: { targetUrl: 'https://example.com/', prompt, model: 'gpt-6-luna', maxActions: 5, state: 'pending', loginEnabled: true, credentials },
+    plan: { targetUrl: 'https://example.com/', prompt, model: 'gpt-6-luna', state: 'pending', loginEnabled: true, credentials },
   } as any];
   (conversation as any).credentials = credentials;
   saveConversations([conversation]);
@@ -200,7 +219,7 @@ test('restored contaminated history is sanitized and loginEnabled accepts boolea
   const conversation = createConversation('Login');
   values.set('webpilot.conversations.v1', JSON.stringify([{ ...conversation, messages: [
     { ...createMessage('user', '비밀번호: partial-secret-811') },
-    { ...createMessage('assistant', 'plan'), source: 'local', plan: { targetUrl: 'https://example.com/', prompt: 'id: account-744\npassword: full-secret-922', model: 'gpt-6-luna', maxActions: 5, state: 'pending', loginEnabled: 'yes' } },
+    { ...createMessage('assistant', 'plan'), source: 'local', plan: { targetUrl: 'https://example.com/', prompt: 'id: account-744\npassword: full-secret-922', model: 'gpt-6-luna', state: 'pending', loginEnabled: 'yes' } },
   ] }]));
   const restored = loadConversations();
   assert.equal(JSON.stringify(restored).includes('partial-secret-811'), false);
@@ -208,12 +227,15 @@ test('restored contaminated history is sanitized and loginEnabled accepts boolea
   assert.equal(restored[0].messages[1].plan?.loginEnabled, undefined);
 });
 
-test('persists action limits above five without truncation and rejects unsafe precision', () => {
-  for (const maxActions of [6, 1000, Number.MAX_SAFE_INTEGER]) {
-    const conversation = createConversation('Large limit');
-    conversation.messages = [{ ...createMessage('assistant', '버그 탐색 계획'), source: 'local', plan: { targetUrl: 'https://example.com/', prompt: '버그를 탐색해 줘', model: 'gpt-6-luna', maxActions, state: 'pending' } }];
-    saveConversations([conversation]);
-    assert.equal(loadConversations()[0].messages[0].plan?.maxActions, maxActions);
+test('migrates legacy visual limits without dropping plans and removes them from saved history', () => {
+  for (const maxActions of [1, 6, 1000, Number.MAX_SAFE_INTEGER, 0, -1, 1.5, 'legacy', null, { invalid: true }]) {
+    const conversation = createConversation('Legacy limit');
+    const plan = { targetUrl: 'https://example.com/', prompt: '버그를 탐색해 줘', model: 'gpt-6-luna', state: 'pending' };
+    values.set('webpilot.conversations.v1', JSON.stringify([{ ...conversation, messages: [{ ...createMessage('assistant', '버그 탐색 계획'), source: 'local', plan: { ...plan, maxActions } }] }]));
+    const restored = loadConversations();
+    assert.deepEqual(restored[0].messages[0].plan, plan);
+    saveConversations(restored);
+    assert.equal(values.get('webpilot.conversations.v1')!.includes('maxActions'), false);
   }
 });
 
@@ -242,4 +264,45 @@ test('drops malformed report metadata without losing its conversation message', 
   const messages = loadConversations()[0].messages;
   assert.equal(messages.length, malformed.length);
   assert.equal(messages.every(message => message.report === undefined && message.content === 'kept'), true);
+});
+test('per-run backend settings survive restoration and reject secret or arbitrary argument fields', () => {
+  const conversation = createConversation('Backend settings');
+  const backendOptions = { provider: 'openai' as const, models: { plan: 'gpt-6.2-astra', triage: 'gpt-6-luna' }, budgetUsd: 1.5, maxPages: 9 };
+  conversation.messages = [{ ...createMessage('assistant', 'plan'), source: 'local', plan: { targetUrl: 'https://example.com/', prompt: '검사 요구사항', model: 'claude-haiku-5-5', provider: 'anthropic', state: 'pending', backendOptions } }];
+  saveConversations([conversation]);
+  const restored = loadConversations()[0].messages[0].plan!;
+  assert.equal(restored.provider, 'anthropic');
+  assert.equal(restored.backendOptions?.provider, 'openai');
+  assert.deepEqual(restored.backendOptions?.models, backendOptions.models);
+  assert.equal(restored.backendOptions?.budgetUsd, 1.5);
+  assert.equal(restored.backendOptions?.maxPages, 9);
+  (conversation.messages[0].plan!.backendOptions as any).apiKey = 'never-persist-backend-key';
+  saveConversations([conversation]);
+  assert.equal(values.get('webpilot.conversations.v1')?.includes('never-persist-backend-key'), false);
+  assert.equal(loadConversations()[0].messages[0].plan, undefined);
+});
+
+test('persists only same-origin login URL metadata and never persists the transient account', () => {
+  const conversation = createConversation('Backend login');
+  conversation.messages = [{ ...createMessage('assistant', 'plan'), source: 'local', plan: { targetUrl: 'https://example.com/', prompt: '로그인 후 검사', model: 'gpt-6-luna', state: 'pending', loginEnabled: true, backendLoginUrl: 'https://example.com/login', credentials: { username: 'private-user-482', password: 'private-secret-775' } } as any }];
+  saveConversations([conversation]);
+  assert.equal(loadConversations()[0].messages[0].plan?.backendLoginUrl, 'https://example.com/login');
+  assert.equal(values.get('webpilot.conversations.v1')?.includes('private-'), false);
+  conversation.messages[0].plan!.backendLoginUrl = 'https://other.test/login';
+  saveConversations([conversation]);
+  assert.equal(loadConversations()[0].messages[0].plan, undefined);
+});
+
+test('legacy accounts prevent secret-bearing plan URLs from being restored or persisted', () => {
+  const conversation = createConversation('Legacy account URL');
+  const base = { targetUrl: 'https://example.com/admin/login', prompt: '로그인 후 검사', model: 'gpt-6-luna', state: 'pending', loginEnabled: true, backendLoginUrl: 'https://example.com/admin/login', credentials: { username: 'admin', password: 'secret-661' } };
+  for (const patch of [{ backendLoginUrl: 'https://example.com/?account=%61dmin' }, { backendLoginUrl: 'https://example.com/#admin' }, { targetUrl: 'https://example.com/%73ecret-661/login' }]) {
+    const input = [{ ...conversation, messages: [{ ...createMessage('assistant', 'plan'), source: 'local', plan: { ...base, ...patch } }] }];
+    values.set('webpilot.conversations.v1', JSON.stringify(input));
+    assert.equal(loadConversations()[0].messages[0].plan, undefined);
+    saveConversations(input as any);
+    assert.equal(loadConversations()[0].messages[0].plan, undefined);
+  }
+  values.set('webpilot.conversations.v1', JSON.stringify([{ ...conversation, messages: [{ ...createMessage('assistant', 'plan'), plan: base }] }]));
+  assert.equal(loadConversations()[0].messages[0].plan?.targetUrl, base.targetUrl);
 });

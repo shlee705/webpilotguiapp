@@ -1,0 +1,576 @@
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer, type Server } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { runPlan } from '../src/run.ts';
+import { specFor, sequence } from '../src/generate.ts';
+import { reconcile, type Entry } from '../src/reconcile.ts';
+import { cloneScenarios, validate, type Plan } from '../src/plan.ts';
+import { preclassify, systemVerdict, groupSignals } from '../src/triage.ts';
+
+let server: Server | undefined;
+let origin = '';
+const writes: string[] = [];
+before(async () => {
+  server = createServer(async (req, res) => {
+    if (req.method !== 'GET') { writes.push(`${req.method} ${req.url}`); return res.end('ok'); }
+    if (req.url === '/api/denied') { res.statusCode = 403; return res.end(); }
+    if (req.url === '/api/slow') { setTimeout(() => { res.statusCode = 500; res.end(); }, 600); return; }
+    try {
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      res.end(await readFile(new URL(`./fixtures${new URL(req.url!, 'http://x').pathname}`, import.meta.url)));
+    } catch { res.statusCode = 404; res.end(); }
+  });
+  await new Promise<void>(r => server!.listen(0, '127.0.0.1', r));
+  origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+});
+after(() => { server?.close(); });
+
+const runDir = (name: string) =>
+  fileURLToPath(new URL(`../runs/test-${name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, import.meta.url));
+const src = (id: string, quote: string) => ({ kind: 'requirement' as const, id, quote });
+
+function plan(): Plan {
+  return {
+    version: 1, observations: [], features: [], questions: [],
+    requirements: [
+      { id: 'R1', text: '담기를 누르면 장바구니 개수가 1 늘어난다' },
+      { id: 'R2', text: '쿠폰 적용 창에서 확인을 누를 수 있다' },
+      { id: 'R3', text: '이메일을 넣고 가입하면 가입 요청을 보낸다' },
+      { id: 'R4', text: '주문 내역은 마이페이지에 남는다' },
+      { id: 'R5', text: '카테고리 표시는 Textiles이다' },
+    ],
+    targets: {
+      T1: { target: { role: 'listitem' }, group: true, url: `${origin}/list.html` },
+      T2: { target: { role: 'button', name: '^담기$', within: { role: 'listitem', text: '상품 걡 .*?원' } }, group: false, url: `${origin}/list.html` },
+      T3: { target: { text: '장바구니 \\(.*?\\)' }, group: false, url: `${origin}/list.html` },
+      T4: { target: { role: 'button', name: '^없어진 버튼$' }, group: false, url: `${origin}/modal.html` },
+      T5: { target: { role: 'textbox', name: '^이메일$' }, group: false, url: `${origin}/form.html` },
+      T6: { target: { role: 'button', name: '^가입$' }, group: false, url: `${origin}/form.html` },
+      T7: { target: { role: 'heading', name: '^가입 완료$' }, group: false, url: `${origin}/form.html` },
+      T8: { target: { role: 'paragraph', text: '^Textiles$' }, group: false, url: `${origin}/styled.html` },
+    },
+    scenarios: [
+      { id: 'S1', title: '담기', covers: ['R1'], start: { url: `${origin}/list.html` },
+        steps: [{ id: 'S1.A1', op: 'click', target: 'T2' }],
+        checks: [
+          { id: 'S1.C1', after: 'start', target: 'T1', read: 'count', op: 'equals', expected: '30', source: { kind: 'observed' } },
+          { id: 'S1.C2', after: 'S1.A1', target: 'T3', read: 'text', op: 'equals', expected: '장바구니 (1)', source: src('R1', '1 늘어난다') },
+          { id: 'S1.C3', after: 'S1.A1', target: 'T3', read: 'text', op: 'equals', expected: '장바구니 (5)', source: { kind: 'inferred', rule: 'no-error-page', quote: '이 검사에 이 일반 규칙이 적용되는 이유를 적는다' } },
+        ] },
+      { id: 'S2', title: '사라진 버튼', covers: ['R2'], start: { url: `${origin}/modal.html` },
+        steps: [{ id: 'S2.A1', op: 'click', target: 'T4' }],
+        checks: [{ id: 'S2.C1', after: 'S2.A1', target: 'T4', read: 'visible', op: 'equals', expected: 'true', source: src('R2', '확인을 누를 수 있다') }] },
+      { id: 'S3', title: '가입 요청', covers: ['R3'], start: { url: `${origin}/form.html` },
+        steps: [{ id: 'S3.A1', op: 'fill', target: 'T5', value: 'a@b.c' }, { id: 'S3.A2', op: 'click', target: 'T6' }],
+        checks: [{ id: 'S3.C1', after: 'S3.A2', target: 'T7', read: 'visible', op: 'equals', expected: 'false', source: src('R3', '가입 요청을 보낸다') }] },
+      // CSS text-transform으로 대문자로 보이지만 DOM 텍스트(모델이 본 값)는 Textiles다. 첫 실측의 오탐 원인 회귀.
+      { id: 'S4', title: '표시 변환', covers: ['R5'], start: { url: `${origin}/styled.html` }, steps: [],
+        checks: [{ id: 'S4.C1', after: 'start', target: 'T8', read: 'text', op: 'equals', expected: 'Textiles', source: src('R5', 'Textiles') }] },
+    ],
+    unplanned: [{ requirement: 'R4', reason: '로그인 필요' }],
+  };
+}
+
+test('spec은 ID만 담은 고정 템플릿이고, 같은 plan이면 같은 코드다', () => {
+  const s = plan().scenarios[0];
+  const code = specFor(s, '../../src/fixture.ts');
+  assert.equal(code, specFor(s, '../../src/fixture.ts'));
+  assert.deepEqual(sequence(s).map(x => x.id), ['S1', 'S1.C1', 'S1.A1', 'S1.C2', 'S1.C3']);
+  assert.ok(!code.includes('장바구니') && !code.includes('expect('), code);
+  const evil = { ...s, id: 'S9', title: '"); require("child_process"); ("' };
+  assert.ok(specFor(evil, 'x').includes(JSON.stringify(`S9 ${evil.title}`)));
+});
+
+test('실행: 통과·불일치·대상 사라짐·쓰기 차단을 ledger로 구분한다', async () => {
+  writes.length = 0;
+  const p = plan();
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('mixed'), timeoutMs: 1500 });
+  const log = readFileSync(`${r.runDir}/playwright.log`, 'utf8');
+  assert.deepEqual(r.problems, [], log);
+  const [s1, s2, s3, s4] = r.scenarios;
+  assert.deepEqual(s4.checks.map(c => [c.status, c.actual]), [['passed', 'Textiles']]);
+
+  assert.equal(s1.start, 'ok', log);
+  assert.deepEqual(s1.checks.map(c => [c.id, c.status, c.actual]), [
+    ['S1.C1', 'passed', '30'], ['S1.C2', 'passed', '장바구니 (1)'], ['S1.C3', 'mismatch', '장바구니 (1)'],
+  ]);
+
+  assert.equal(s2.steps[0].status, 'not_executed');
+  assert.equal(s2.steps[0].reason, 'target_changed');
+  assert.equal(s2.checks[0].status, 'not_run');
+
+  assert.deepEqual(s3.steps.map(x => x.status), ['ok', 'ok']);
+  assert.equal(s3.checks[0].status, 'passed');
+  assert.ok(s3.blocked.some(b => b.startsWith('POST') && b.includes('/signup')), JSON.stringify(s3));
+  assert.deepEqual(writes, []);
+
+  const n = (o: Partial<Record<string, number>>) => ({ passed: 0, mismatch: 0, unresolved: 0, error: 0, not_run: 0, visual_pending: 0, invalid: 0, ...o });
+  assert.deepEqual(r.scenarios.map(s => [s.id, s.valid]), [['S1', true], ['S2', true], ['S3', true], ['S4', true]], JSON.stringify(r.scenarios.map(s => s.invalid)));
+  assert.deepEqual(r.requirements.map(q => [q.id, q.plan, q.checks]), [
+    ['R1', 'planned', n({ passed: 1 })],
+    ['R2', 'planned', n({ not_run: 1 })],
+    ['R3', 'planned', n({ passed: 1 })],
+    ['R4', 'unplanned', n({})],
+    ['R5', 'planned', n({ passed: 1 })],
+  ]);
+  assert.notEqual(r.exitCode, 0, 'mismatch와 실패한 행동이 있으면 playwright 종료 코드도 실패');
+  const manifest = JSON.parse(readFileSync(`${r.runDir}/manifest.json`, 'utf8'));
+  assert.ok(manifest.files['src/fixture.ts'] && manifest.playwright && manifest.timeoutMs === 1500, JSON.stringify(manifest));
+});
+
+test('실행 중 호출자가 plan을 바꿔도 판정은 실행 시작 때의 사본으로 한다', async () => {
+  const p = plan();
+  p.scenarios = [p.scenarios[0]];
+  p.requirements = p.requirements.filter(r => r.id === 'R1');
+  p.unplanned = [];
+  const pending = runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('frozen'), timeoutMs: 1500 });
+  p.scenarios[0].checks[1].expected = '바뀐 기대값';
+  const r = await pending;
+  assert.deepEqual(r.scenarios[0].checks.map(c => [c.status, c.expected]).slice(1, 2), [['passed', '장바구니 (1)']]);
+});
+
+test('계약을 통과하지 못한 plan은 실행하지 않고, 같은 실행 폴더는 덮어쓰지 않는다', async () => {
+  const bad = plan();
+  bad.unplanned = [];
+  await assert.rejects(runPlan({ plan: bad, policy: { origins: [origin] }, runDir: runDir('bad') }), /R4 is neither covered/);
+  const p = plan();
+  p.scenarios = [];
+  p.unplanned = p.requirements.map(r => ({ requirement: r.id, reason: '테스트' }));
+  const dir = runDir('twice');
+  await runPlan({ plan: p, policy: { origins: [origin] }, runDir: dir });
+  await assert.rejects(runPlan({ plan: p, policy: { origins: [origin] }, runDir: dir }), /덮어쓰지 않음/);
+});
+
+const e = (kind: Entry['kind'], id: string, extra: Partial<Entry> = {}): Entry =>
+  ({ kind, at: '', ...(kind === 'start' || kind === 'policy' ? { scenario: id } : { id }), ...extra });
+const policyOk = (id: string) => e('policy', id, { blocked: [], violations: [] });
+
+test('reconcile: 건너뛴 검사·중복·모르는 ID는 그 시나리오를 무효로 만든다', () => {
+  const r = reconcile(plan(), [
+    e('start', 'S1', { status: 'ok' }),
+    e('act', 'S1.A1', { status: 'ok' }),                               // S1.C1을 건너뜀
+    e('check', 'S1.C2', { status: 'passed', actual: '장바구니 (1)' }),
+    e('check', 'S1.C2', { status: 'passed', actual: '장바구니 (1)' }),  // 중복
+    e('check', 'S9.C1', { status: 'passed' }),                          // 모르는 ID
+    policyOk('S1'),
+  ]);
+  const s1 = r.scenarios[0];
+  assert.equal(s1.valid, false);
+  assert.deepEqual(s1.checks.map(c => c.status), ['not_run', 'passed', 'not_run']);
+  assert.ok(r.problems.some(x => x.startsWith('S1: 2번째 기록이 act:S1.A1')), r.problems.join('\n'));
+  assert.ok(r.problems.some(x => x.includes('S9.C1')));
+  assert.equal(r.requirements[0].checks.invalid, 1, '무효 시나리오의 통과는 통과로 세지 않는다');
+  assert.equal(r.requirements[0].checks.passed, 0);
+});
+
+test('reconcile: 기록된 상태를 믿지 않고 고정된 기대값으로 다시 계산한다', () => {
+  const r = reconcile(plan(), [
+    e('start', 'S1', { status: 'ok' }),
+    e('check', 'S1.C1', { status: 'passed', actual: '29' }),
+    policyOk('S1'),
+  ]);
+  assert.equal(r.scenarios[0].checks[0].status, 'mismatch');
+  assert.equal(r.scenarios[0].valid, false);
+  assert.ok(r.problems.some(x => x.includes('다시 계산한 mismatch')));
+});
+
+test('reconcile: 정렬 기준을 특정할 수 없는 기록은 결함이 아니라 못 읽은 값으로 다시 계산한다', () => {
+  const p = plan();
+  p.scenarios[0].checks[0] = { ...p.scenarios[0].checks[0], target: 'T1', read: 'items', op: 'sorted_asc', expected: 'number', expected_from: undefined, offset: undefined };
+  const r = reconcile(p, [e('start', 'S1', { status: 'ok' }), e('check', 'S1.C1', { status: 'mismatch', actual: '["글 · 조회 5"]' }), policyOk('S1')]);
+  assert.equal(r.scenarios[0].checks[0].status, 'unresolved');
+  assert.ok(r.problems.some(x => x.includes('다시 계산한 unresolved')), '실행기 기록과 다르면 표시한다');
+});
+
+test('reconcile: 정책 기록이 없거나 위반이 있으면 무효, 시작 실패 뒤 기록도 무효', () => {
+  const ok = [e('start', 'S1', { status: 'ok' }), e('check', 'S1.C1', { status: 'passed', actual: '30' })];
+  assert.equal(reconcile(plan(), ok).scenarios[0].valid, false);
+  assert.equal(reconcile(plan(), [...ok, policyOk('S1')]).scenarios[0].valid, true);
+  const violated = reconcile(plan(), [...ok, e('policy', 'S1', { blocked: [], violations: ['redirect http://evil/'] })]);
+  assert.deepEqual(violated.scenarios[0].invalid, ['정책 위반: redirect http://evil/']);
+  const failedStart = reconcile(plan(), [e('start', 'S1', { status: 'failed' }), e('check', 'S1.C1', { status: 'passed', actual: '30' }), policyOk('S1')]);
+  assert.ok(failedStart.scenarios[0].invalid.some(x => x.includes('시작하지 못했는데')));
+});
+
+test('reconcile: 계획도 unplanned도 아닌 요구사항은 missing이다', () => {
+  const p = plan();
+  p.unplanned = [];
+  assert.equal(reconcile(p, []).requirements[3].plan, 'missing');
+});
+test('M2 실행: 준비 대기 뒤 시작 증거, 관측 참조·url·items 비교, 선행조건 실패는 멈춤', async () => {
+  const shop = `${origin}/shop.html`;
+  const rule = { kind: 'inferred' as const, rule: 'no-error-page', quote: '이 검사에 이 일반 규칙이 적용되는 이유를 적는다' };
+  const p: Plan = {
+    version: 1, observations: [], features: [], questions: [],
+    requirements: [{ id: 'R1', text: '카드를 누르면 그 상품의 상세가 열린다' }],
+    targets: {
+      T1: { target: { role: 'link', name: '^Orb Lamp$' }, group: false, url: shop },
+      T2: { target: { role: 'heading' }, group: false, url: `${shop}?item=Orb%20Lamp` },
+      T3: { target: { role: 'link' }, group: true, url: shop },
+      T4: { target: { role: 'heading', name: '^없는 제목$' }, group: false, url: shop },
+    },
+    scenarios: ['', '#bug'].map((q, i) => ({
+      id: `S${i + 1}`, title: q ? '결함 버전' : '정상', covers: ['R1'], start: { url: shop + q },
+      steps: [{ id: `S${i + 1}.A1`, op: 'click' as const, target: 'T1' }],
+      checks: [
+        { id: `S${i + 1}.C1`, after: 'start', target: 'T3', read: 'count' as const, op: 'equals' as const, expected: '3', source: { kind: 'observed' as const }, precondition: true },
+        { id: `S${i + 1}.C2`, after: 'start', target: 'T1', read: 'text' as const, op: 'contains' as const, expected: 'Lamp', source: { kind: 'observed' as const } },
+        { id: `S${i + 1}.C3`, after: 'start', target: 'T3', read: 'items' as const, op: 'any_equal' as const, expected: 'Harvest Table', source: { kind: 'observed' as const } },
+        { id: `S${i + 1}.C4`, after: `S${i + 1}.A1`, target: 'T2', read: 'text' as const, op: 'equals' as const, expected_from: `S${i + 1}.C2`, source: src('R1', '그 상품의 상세가 열린다') },
+        { id: `S${i + 1}.C5`, after: `S${i + 1}.A1`, read: 'url' as const, op: 'contains' as const, expected: 'item=', source: rule },
+      ],
+    })),
+    unplanned: [],
+  };
+  p.scenarios.push({ id: 'S3', title: '준비 실패', covers: ['R1'], start: { url: shop }, steps: [{ id: 'S3.A1', op: 'click', target: 'T1' }],
+    checks: [
+      { id: 'S3.C1', after: 'start', target: 'T4', read: 'visible', op: 'equals', expected: 'true', source: { kind: 'observed' }, precondition: true },
+      { id: 'S3.C2', after: 'S3.A1', target: 'T2', read: 'visible', op: 'equals', expected: 'true', source: src('R1', '상세가 열린다') },
+    ] });
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('m2'), timeoutMs: 2000 });
+  const log = readFileSync(`${r.runDir}/playwright.log`, 'utf8');
+  assert.deepEqual(r.problems, [], log);
+  const [ok, bug, pre] = r.scenarios;
+  assert.equal(ok.ready, true, '시작 증거는 화면이 멈춘 뒤 찍는다');
+  assert.ok(readFileSync(`${r.runDir}/${ok.startEvidence![0]}`, 'utf8').includes('Orb Lamp'), '시작 증거가 로딩 화면이 아니다');
+  assert.deepEqual(ok.checks.map(c => c.status), ['passed', 'passed', 'passed', 'passed', 'passed'], JSON.stringify(ok.checks));
+  assert.equal(ok.checks[3].expected, 'Orb Lamp', '관측 참조는 앞선 검사의 실제 값으로 풀린다');
+  assert.equal(ok.precondition, 'met');
+  assert.deepEqual(bug.checks.map(c => c.status), ['passed', 'passed', 'passed', 'mismatch', 'passed']);
+  assert.deepEqual([bug.checks[3].expected, bug.checks[3].actual], ['Orb Lamp', 'Harvest Table']);
+  assert.deepEqual([pre.precondition, pre.valid, pre.steps[0].status, pre.checks[1].status], ['failed', true, 'not_run', 'not_run']);
+  const v = Object.fromEntries(preclassify(p, r).map(x => [x.id, x]));
+  assert.deepEqual([v['S3.C1'].class, v['S3.C2'].class, v['S3.C2'].cause], ['precondition_failed', 'not_run', 'S3.C1'], '준비 실패는 결함 후보가 아니다');
+  assert.equal(v['S2.C4'].class, 'mismatch');
+
+  // 시나리오를 동시에 실행해도 판정은 순차와 같다. 시나리오 하나의 단계는 한 워커에서 차례로 돈다.
+  const par = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('m2-par'), timeoutMs: 2000, workers: 3 });
+  assert.deepEqual(par.problems, [], readFileSync(`${par.runDir}/playwright.log`, 'utf8'));
+  assert.deepEqual(par.scenarios.map(s => [s.id, s.valid, s.precondition, s.checks.map(c => c.status)]), r.scenarios.map(s => [s.id, s.valid, s.precondition, s.checks.map(c => c.status)]));
+  assert.equal(JSON.parse(readFileSync(`${par.runDir}/manifest.json`, 'utf8')).workers, 3, '재현은 manifest의 워커 수를 따른다');
+  const writes = await runPlan({ plan: p, policy: { origins: [origin], allowWrites: true }, runDir: runDir('m2-writes'), timeoutMs: 2000, workers: 3 });
+  assert.equal(JSON.parse(readFileSync(`${writes.runDir}/manifest.json`, 'utf8')).workers, 1, '쓰기 허용 실행은 서버 상태를 공유하므로 동시에 돌리지 않는다');
+});
+
+test('reconcile·1차 분류: 관측 참조는 정상적으로 읽은 값만 쓰고, 실행 안 된 선행조건은 준비 실패가 아니다', () => {
+  const p = plan();
+  const s = p.scenarios[0];
+  s.checks = [
+    { id: 'S1.C1', after: 'start', target: 'T3', read: 'text', op: 'contains', expected: '장바구니', source: { kind: 'observed' }, precondition: true },
+    { id: 'S1.C2', after: 'start', target: 'T1', read: 'count', op: 'greater', expected: '0', source: { kind: 'observed' }, precondition: true },
+    { id: 'S1.C3', after: 'S1.A1', target: 'T3', read: 'text', op: 'equals', expected_from: 'S1.C1', source: src('R1', '1 늘어난다') },
+  ];
+  const ledger = (refStatus: string) => [
+    e('start', 'S1', { status: 'ok' }), e('check', 'S1.C1', { status: refStatus, actual: 'BAD' }), e('check', 'S1.C2', { status: 'passed', actual: '30' }),
+    e('act', 'S1.A1', { status: 'ok' }), e('check', 'S1.C3', { status: 'passed', actual: 'BAD' }), policyOk('S1')];
+  const forged = reconcile(p, ledger('unresolved')).scenarios[0];
+  assert.equal(forged.checks[2].status, 'error', '미해결 기록의 actual로 관측 참조를 통과시키지 않는다');
+  assert.equal(reconcile(p, ledger('passed')).scenarios[0].checks[2].status, 'passed');
+
+  const startFailed = reconcile(p, [e('start', 'S1', { status: 'failed' }), policyOk('S1')]);
+  const v = preclassify({ ...p, scenarios: [s] }, { runDir: '', exitCode: 1, problems: [], requirements: [], scenarios: [startFailed.scenarios[0]] });
+  assert.deepEqual(v.filter(x => x.kind === 'check').map(x => x.class), ['not_run', 'not_run', 'not_run'], JSON.stringify(v));
+  assert.equal(v.find(x => x.kind === 'start')?.class, 'needs_triage', '원인을 모르는 시작 실패는 AI 분류로 보낸다');
+  // 실행 쪽 네트워크가 끊겨 시작 페이지를 못 열었으면 AI 없이 환경 실패(판정 못 함). 대상 서버의 연결 거부는 앱 쪽일 수 있어 그대로 분류로 보낸다.
+  const withSignal = (text: string) => preclassify({ ...p, scenarios: [s] }, { runDir: '', exitCode: 1, problems: [], requirements: [],
+    scenarios: [{ ...startFailed.scenarios[0], signals: [{ kind: 'requestfailed', after: 'start', url: 'http://x/', text }] }] }).find(x => x.kind === 'start')!;
+  const net = withSignal('GET net::ERR_INTERNET_DISCONNECTED');
+  assert.deepEqual([net.class, systemVerdict(p, net).level, systemVerdict(p, net).reason], ['environment_failure', 'incomplete', '실행 환경 네트워크 끊김(GET net::ERR_INTERNET_DISCONNECTED)']);
+  assert.equal(withSignal('GET net::ERR_CONNECTION_REFUSED').class, 'needs_triage');
+});
+
+test('C4: 같은 템플릿 다른 페이지에서 계획을 실행하고, 대상이 없으면 결함이 아니라 적용 불가로 남긴다', async () => {
+  const a = `${origin}/item/a.html`;
+  const why = { kind: 'inferred' as const, rule: 'no-error-page', quote: '상품 상세 주소가 오류 없이 열린다' };
+  const base: Plan = {
+    version: 1, observations: [], features: [{ id: 'F1', name: '상품 상세', page: a }], questions: [],
+    requirements: [],
+    targets: {
+      T1: { target: { role: 'heading' }, group: false, url: a },
+      T2: { target: { role: 'heading', name: '^상품 A$' }, group: false, url: a },
+      T3: { target: { role: 'button' }, group: false, url: a },
+    },
+    scenarios: [
+      { id: 'S1', title: '제목 있음', covers: ['F1'], start: { url: a }, steps: [], checks: [
+        { id: 'S1.C1', after: 'start', target: 'T1', read: 'text', op: 'equals', expected: '상품 A', source: { kind: 'observed' }, precondition: true },
+        { id: 'S1.C2', after: 'start', read: 'url', op: 'contains', expected: '/item/', source: why },
+      ] },
+      { id: 'S2', title: '이름으로 고정한 제목', covers: ['F1'], start: { url: a }, steps: [], checks: [
+        { id: 'S2.C1', after: 'start', target: 'T2', read: 'visible', op: 'equals', expected: 'true', source: why },
+        { id: 'S2.C2', after: 'start', target: 'T3', read: 'visible', op: 'equals', expected: 'true', source: why },
+      ] },
+      { id: 'S5', title: '요구사항 고정값만', covers: ['F1'], start: { url: a }, steps: [], checks: [
+        { id: 'S5.C1', after: 'start', target: 'T1', read: 'text', op: 'equals', expected: '상품 A', source: { kind: 'constraint', quote: '상품 정보는 판매자가 제공합니다' } },
+      ] },
+    ],
+    unplanned: [],
+  };
+  const b = `${origin}/item/b.html`;
+  const p = cloneScenarios(base, { S1: [b], S2: [b], S5: [b] });
+  assert.deepEqual(p.scenarios.map(s => [s.id, s.variantOf ?? '', s.start.url.replace(origin, '')]),
+    [['S1', '', '/item/a.html'], ['S2', '', '/item/a.html'], ['S5', '', '/item/a.html'], ['S6', 'S1', '/item/b.html'], ['S7', 'S2', '/item/b.html']]);
+  assert.deepEqual([p.scenarios[3].checks[0].op, p.scenarios[3].checks[0].precondition], ['record', undefined], '대표 페이지에서 본 값은 기록만 한다');
+  assert.deepEqual(p.variants!.find(x => x.from === 'S5'), { from: 'S5', url: b, dropped: ['S5.C1: 페이지마다 다를 수 있는 화면 제약 고정값'], skipped: '규칙 근거 검사가 남지 않음' },
+    '복제하지 않은 사유와 뺀 검사를 남긴다');
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('c4'), timeoutMs: 1500 });
+  const s6 = r.scenarios.find(s => s.id === 'S6')!;
+  assert.deepEqual(s6.checks.map(c => c.status), ['passed', 'passed'], JSON.stringify(s6));
+  const v = Object.fromEntries(preclassify(p, r).map(x => [x.id, x]));
+  assert.equal(v['S7.C1'].class, 'not_applicable', '이름으로 고정한 대상이 다른 페이지에 없으면 판단 보류');
+  assert.equal(v['S7.C2'].class, 'mismatch', '구조로 고정한 대상이 없으면 요소 누락일 수 있어 숨기지 않는다');
+  assert.equal(systemVerdict(p, v['S7.C1']).level, 'hold');
+  assert.deepEqual(validate({ ...p, scenarios: [{ ...p.scenarios[0], id: 'S9', variantOf: 'S99' }] }, [], new Map(Object.entries(p.targets)), [origin])
+    .filter(e => e.includes('variantOf')).length, 1, '원본 없는 복제 표식은 거부한다');
+});
+
+test('선택 상자 값은 화면과 select 동작이 쓰는 옵션 라벨로 읽는다', async () => {
+  const posts = `${origin}/posts.html`;
+  const rule = { kind: 'inferred' as const, rule: 'sort-order', quote: '정렬 선택 상자로 목록 순서를 바꾼다' };
+  const p: Plan = {
+    version: 1, observations: [], features: [{ id: 'F1', name: '게시글 정렬', page: `${origin}/posts.html` }], questions: [], requirements: [], unplanned: [],
+    targets: {
+      T1: { target: { role: 'combobox', name: '^정렬$' }, group: false, url: posts },
+      T2: { target: { role: 'listitem', within: { role: 'list', name: '^게시글$' } }, group: true, url: posts },
+    },
+    scenarios: [{ id: 'S1', title: '조회수 정렬', covers: ['F1'], start: { url: posts },
+      steps: [{ id: 'S1.A1', op: 'select', target: 'T1', value: '조회수 높은순' }],
+      checks: [
+        { id: 'S1.C1', after: 'start', target: 'T1', read: 'value', op: 'equals', expected: '최신순', source: { kind: 'observed' }, precondition: true },
+        { id: 'S1.C2', after: 'S1.A1', target: 'T1', read: 'value', op: 'not_equals', expected_from: 'S1.C1', source: { kind: 'inferred', rule: 'action-has-effect', quote: '정렬 옵션을 고르면 선택 값이 바뀐다' } },
+        { id: 'S1.C3', after: 'S1.A1', target: 'T2', read: 'items', op: 'sorted_desc', expected: 'number', source: rule },
+      ] }],
+  };
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('select'), timeoutMs: 2000 });
+  assert.deepEqual(r.problems, [], readFileSync(`${r.runDir}/playwright.log`, 'utf8'));
+  assert.deepEqual(r.scenarios[0].checks.map(c => c.status), ['passed', 'passed', 'passed'], JSON.stringify(r.scenarios[0].checks));
+  assert.deepEqual(r.scenarios[0].checks.slice(0, 2).map(c => c.actual), ['최신순', '조회수 높은순']);
+});
+
+test('대상 없이 누른 브라우저 이동 단축키(Alt+ArrowLeft·Right)는 실제로 뒤로·앞으로 간다', async () => {
+  const url = `${origin}/save.html`;
+  const p: Plan = {
+    version: 1, observations: [], features: [{ id: 'F1', name: '다음 페이지', page: url }], questions: [], requirements: [], unplanned: [],
+    targets: { T1: { target: { role: 'link', name: '^다음$' }, group: false, url } },
+    scenarios: [{ id: 'S1', title: '뒤로 갔다 앞으로', covers: ['F1'], start: { url },
+      steps: [{ id: 'S1.A1', op: 'click', target: 'T1' }, { id: 'S1.A2', op: 'press', value: 'Alt+ArrowLeft' }, { id: 'S1.A3', op: 'press', value: 'Alt+ArrowRight' }],
+      checks: [
+        { id: 'S1.C1', after: 'start', read: 'url', op: 'equals', expected: url, source: { kind: 'observed' }, precondition: true },
+        { id: 'S1.C2', after: 'S1.A2', read: 'url', op: 'equals', expected_from: 'S1.C1', source: { kind: 'inferred', rule: 'state-persists', quote: '뒤로 가면 처음 페이지로 돌아온다' } },
+        { id: 'S1.C3', after: 'S1.A3', read: 'url', op: 'not_equals', expected_from: 'S1.C1', source: { kind: 'inferred', rule: 'action-has-effect', quote: '앞으로 가면 다음 페이지로 간다' } },
+      ] }],
+  };
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('history-keys'), timeoutMs: 2000 });
+  assert.deepEqual(r.problems, [], readFileSync(`${r.runDir}/playwright.log`, 'utf8'));
+  assert.deepEqual(r.scenarios[0].checks.map(c => [c.status, c.actual]), [['passed', url], ['passed', url], ['passed', `${origin}/save-other.html`]]);
+});
+
+test('네이티브 select가 아닌 ARIA 콤보박스의 값은 snapshot에 보이는 값으로 읽는다(정상·결함 쌍)', async () => {
+  const run = async (hash: string) => {
+    const url = `${origin}/sortbox.html${hash}`;
+    const p: Plan = {
+      version: 1, observations: [], features: [{ id: 'F1', name: '정렬', page: url }], questions: [], requirements: [], unplanned: [],
+      targets: {
+        T1: { target: { role: 'combobox', name: '^정렬$' }, group: false, url },
+        T2: { target: { role: 'option', name: '^가격 낮은순$' }, group: false, url },
+        T3: { target: { role: 'slider', name: '^가격 상한$' }, group: false, url },
+      },
+      scenarios: [{ id: 'S1', title: '가격순 정렬', covers: ['F1'], start: { url },
+        steps: [{ id: 'S1.A1', op: 'click', target: 'T1' }, { id: 'S1.A2', op: 'click', target: 'T2' }],
+        checks: [
+          { id: 'S1.C1', after: 'start', target: 'T1', read: 'value', op: 'equals', expected: '최신순', source: { kind: 'observed' }, precondition: true },
+          { id: 'S1.C2', after: 'S1.A2', target: 'T1', read: 'value', op: 'not_equals', expected_from: 'S1.C1', source: { kind: 'inferred', rule: 'action-has-effect', quote: '다른 정렬 기준을 고르면 상자 값이 바뀐다' } },
+          { id: 'S1.C3', after: 'start', target: 'T3', read: 'value', op: 'equals', expected: '50', source: { kind: 'observed' } },
+        ] }],
+    };
+    const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir(`sortbox${hash ? '-bug' : ''}`), timeoutMs: 2000 });
+    assert.deepEqual(r.problems, [], readFileSync(`${r.runDir}/playwright.log`, 'utf8'));
+    return r.scenarios[0].checks.map(c => [c.status, c.actual]);
+  };
+  // slider는 값을 읽는 규칙이 없어 못 읽음(unresolved)이다. 빈 값으로 불일치를 만들지 않는다.
+  assert.deepEqual(await run(''), [['passed', '최신순'], ['passed', '가격 낮은순'], ['unresolved', undefined]]);
+  // 결함 버전: 오류(읽지 못함)가 아니라 값을 읽어 불일치로 남는다.
+  assert.deepEqual(await run('#bug'), [['passed', '최신순'], ['mismatch', '최신순'], ['unresolved', undefined]]);
+});
+
+test('오류 신호: 콘솔 오류·스크립트 예외·400 이상 응답을 난 단계에 붙이고, 정상 거절은 표시하고, 정책 차단·favicon은 빼고, 시나리오끼리 묶는다', async () => {
+  const url = `${origin}/signals.html`;
+  const rule = { kind: 'inferred' as const, rule: 'no-error-page', quote: '불러오기 뒤 페이지가 오류 없이 상태를 보여 준다' };
+  const p: Plan = {
+    version: 1, observations: [], features: [{ id: 'F1', name: '불러오기', page: url }], questions: [], requirements: [], unplanned: [],
+    targets: {
+      T1: { target: { role: 'button', name: '^불러오기$' }, group: false, url },
+      T2: { target: { role: 'button', name: '^외부 호출$' }, group: false, url },
+      T3: { target: { role: 'status' }, group: false, url },
+    },
+    scenarios: ['S1', 'S2'].map(id => ({ id, title: '불러오기와 외부 호출', covers: ['F1'], start: { url },
+      steps: [{ id: `${id}.A1`, op: 'click' as const, target: 'T1' }, { id: `${id}.A2`, op: 'click' as const, target: 'T2' }],
+      checks: [{ id: `${id}.C1`, after: `${id}.A1`, target: 'T3', read: 'text' as const, op: 'equals' as const, expected: '불러옴', source: rule },
+        { id: `${id}.C2`, after: `${id}.A2`, target: 'T3', read: 'text' as const, op: 'equals' as const, expected: '외부 호출함', source: rule }] })),
+  };
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('signals'), timeoutMs: 2000 });
+  assert.deepEqual(r.problems, [], readFileSync(`${r.runDir}/playwright.log`, 'utf8'));
+  const signals = r.scenarios[0].signals!.map(g => [g.kind, g.after, g.text, g.status ?? null, g.normal ?? false]).sort();
+  assert.deepEqual(signals, [
+    ['console', 'start', '초기화 경고', null, false],
+    ['http', 'S1.A1', 'GET 403', 403, true],
+    ['http', 'S1.A1', 'GET 404', 404, false],
+    ['http', 'S1.A1', 'GET 500', 500, false],
+    ['pageerror', 'S1.A1', '불러오기 처리 실패', null, false],
+  ], '정책 차단(외부 호출)과 /favicon.ico는 신호가 아니다. A1에서 보낸 느린 요청의 500은 A2 도중에 와도 A1에 붙는다');
+  assert.ok(r.scenarios[0].blocked.some(b => b.includes('localhost:9/ping')), '외부 호출은 정책 차단으로 따로 남는다');
+  const grouped = groupSignals(r.scenarios);
+  assert.deepEqual(grouped.find(g => g.status === 404)!.at, [{ scenario: 'S1', after: 'S1.A1' }, { scenario: 'S2', after: 'S2.A1' }], '같은 신호는 한 항목으로 묶고 난 곳을 모은다');
+  assert.equal(grouped.length, 5);
+});
+
+test('reconcile: 탭 식별자가 섞이면 무효, 증거 수집 실패와 새로 열린 탭은 결과에 옮긴다', () => {
+  const tabsMixed = reconcile(plan(), [e('start', 'S1', { status: 'ok', tab: '1-1' }), e('check', 'S1.C1', { status: 'passed', actual: '30', tab: '1-2' }), policyOk('S1')]);
+  assert.ok(tabsMixed.scenarios[0].invalid.some(x => x.includes('서로 다른 탭')), tabsMixed.scenarios[0].invalid.join());
+  const tabMissing = reconcile(plan(), [e('start', 'S1', { status: 'ok' }), e('check', 'S1.C1', { status: 'passed', actual: '30', tab: '1-2' }), policyOk('S1')]);
+  assert.ok(tabMissing.scenarios[0].invalid.includes('탭 식별자가 없는 기록이 섞임'), '식별자가 하나뿐이어도 빠진 기록이 있으면 같은 탭이라 볼 수 없다');
+  const r = reconcile(plan(), [
+    e('start', 'S1', { status: 'ok', tab: '1-1', captureErrors: ['aria: 닫힘'] }),
+    e('check', 'S1.C1', { status: 'mismatch', actual: '29', tab: '1-1', captureErrors: ['screenshot: 시간 초과'] }),
+    e('policy', 'S1', { blocked: [], violations: [], newTabs: [{ after: 'S1.A1', url: 'http://x/list' }] }),
+  ]);
+  const s = r.scenarios[0];
+  assert.equal(s.valid, true, s.invalid.join());
+  assert.deepEqual([s.startCaptureErrors, s.checks[0].captureErrors, s.newTabs], [['aria: 닫힘'], ['screenshot: 시간 초과'], [{ after: 'S1.A1', url: 'http://x/list' }]]);
+});
+
+test('실행: 행동이 새 탭을 열면 기록하고, 모든 기록은 한 탭 식별자를 쓴다', async () => {
+  const p: Plan = { version: 1, textRead: 'name+content', requirements: [{ id: 'R1', text: '목록 링크는 새 창으로 열린다' }], features: [], questions: [], observations: [], unplanned: [],
+    targets: { T1: { target: { role: 'link', name: '^목록 새 창으로 열기$' }, group: false, url: `${origin}/popup.html` }, T2: { target: { role: 'heading', name: '^원래 탭$' }, group: false, url: `${origin}/popup.html` } },
+    scenarios: [{ id: 'S1', title: '새 창', covers: ['R1'], start: { url: `${origin}/popup.html` }, steps: [{ id: 'S1.A1', op: 'click', target: 'T1' }],
+      checks: [{ id: 'S1.C1', after: 'S1.A1', target: 'T2', read: 'visible', op: 'equals', expected: 'true', source: { kind: 'requirement', id: 'R1', quote: '새 창으로 열린다' } }] }] };
+  const dir = runDir('popup');
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: dir, timeoutMs: 1500 });
+  const s = r.scenarios[0];
+  assert.equal(s.valid, true, s.invalid.join());
+  assert.deepEqual(s.newTabs?.map(t => t.after), ['S1.A1'], '새 탭을 연 단계를 남긴다');
+  assert.ok(s.newTabs![0].url.endsWith('/list.html'), `열린 직후가 아니라 끝났을 때의 주소: ${s.newTabs![0].url}`);
+  const tabs = readFileSync(`${dir}/ledger.jsonl`, 'utf8').trim().split('\n').map(l => JSON.parse(l)).filter(x => x.kind !== 'policy').map(x => x.tab);
+  assert.ok(tabs.length === 3 && new Set(tabs).size === 1 && tabs[0], JSON.stringify(tabs));
+});
+
+test('실행: 라벨 영역에서 아예 사라진 대상은 보이지 않음으로 읽고, 같은 모양이 남아 있으면 못 읽음으로 둔다', async () => {
+  const url = `${origin}/notice.html`;
+  const req = (id: string) => ({ kind: 'requirement' as const, id, quote: '닫기를 누르면 사라진다' });
+  const p: Plan = { version: 1, textRead: 'name+content', features: [], questions: [], observations: [], unplanned: [],
+    requirements: [{ id: 'R1', text: '닫기를 누르면 사라진다' }],
+    targets: { T1: { target: { role: 'button', anchor: '^알림 설정$', of: 1 }, group: false, url },
+      T2: { target: { role: 'button', anchor: '^필터 칩$', nth: 0, of: 2 }, group: false, url },
+      T3: { target: { role: 'button', name: '^모두 지우기$' }, group: false, url }, T4: { target: { role: 'button', anchor: '^받은 배지$', of: 1 }, group: false, url } },
+    // S3: 누르는 대상(T3)과 사라졌는지 보는 대상(T4)이 다르다. T4는 시작 때 영역을 기억한다.
+    scenarios: [['T1', 'T1'], ['T2', 'T2'], ['T3', 'T4']].map(([act, t], i) => ({ id: `S${i + 1}`, title: t, covers: ['R1'], start: { url }, steps: [{ id: `S${i + 1}.A1`, op: 'click' as const, target: act }],
+      checks: [{ id: `S${i + 1}.C1`, after: `S${i + 1}.A1`, target: t, read: 'visible' as const, op: 'equals' as const, expected: 'false', source: req('R1') }] })) };
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('gone'), timeoutMs: 1500 });
+  const [gone, partly, other] = r.scenarios.map(s => s.checks[0]);
+  assert.deepEqual([gone.status, gone.actual, gone.count], ['passed', 'false', 0], JSON.stringify(gone));
+  assert.equal(partly.status, 'unresolved', '하나가 남아 있으면 어느 것이 사라졌는지 모른다');
+  assert.deepEqual([other.status, other.actual], ['passed', 'false'], '행동하지 않은 대상도 시작 때 기억한 영역에서 사라짐을 본다');
+  assert.match(gone.reason ?? '', /사라짐/, '사라짐 판독의 근거를 남긴다');
+  assert.ok(gone.evidence?.some(e => e.endsWith('.png')), '통과해도 그 시점 증거를 찍는다');
+});
+
+test('실행: 처음부터 닫혀 있는 메뉴는 라벨이 있고 같은 역할 요소가 없을 때 보이지 않음으로 읽고, 늦게 나타나면 통과시키지 않는다', async () => {
+  const mk = (q: string) => `${origin}/closedmenu.html${q}`;
+  const req = { kind: 'requirement' as const, id: 'R1', quote: '누르면 메뉴가 열린다' };
+  const p: Plan = { version: 1, textRead: 'name+content', features: [], questions: [], observations: [], unplanned: [],
+    requirements: [{ id: 'R1', text: '계정 버튼을 누르면 메뉴가 열린다' }],
+    targets: { T1: { target: { role: 'menu', anchor: '^Communications$', of: 1 }, group: false, url: mk('') }, T2: { target: { role: 'button', name: '^Account$' }, group: false, url: mk('') } },
+    startVerified: ['T1 ' + mk('?late'), 'T2 ' + mk('?late')],
+    scenarios: ['', '?late'].map((q, i) => ({ id: `S${i + 1}`, title: q || 'closed', covers: ['R1'], start: { url: mk(q) }, steps: [{ id: `S${i + 1}.A1`, op: 'click' as const, target: 'T2' }],
+      checks: [{ id: `S${i + 1}.C1`, after: 'start', target: 'T1', read: 'visible' as const, op: 'equals' as const, expected: 'false', source: { kind: 'observed' as const }, precondition: true },
+        { id: `S${i + 1}.C2`, after: `S${i + 1}.A1`, target: 'T1', read: 'visible' as const, op: 'equals' as const, expected: 'true', source: req }] })) };
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('closedmenu'), timeoutMs: 4000 });
+  const [closed, late] = r.scenarios.map(s => s.checks.find(c => c.id.endsWith('.C1'))!);
+  assert.deepEqual([closed.status, closed.actual], ['passed', 'false'], JSON.stringify(closed));
+  assert.match(closed.reason ?? '', /라벨은 있고/);
+  assert.notEqual(late.status, 'passed', `늦게 나타난 메뉴를 닫힘으로 통과시키면 안 된다: ${JSON.stringify(late)}`);
+});
+
+test('실행: 보이는 비활성 버튼은 활성화를 기다리지 않고 누르고(자동화 실패가 아님), 결과가 바뀌지 않았는지 읽는다', async () => {
+  const url = `${origin}/disabled.html`;
+  const p: Plan = { version: 1, textRead: 'name+content', features: [{ id: 'F1', name: '이전 버튼', page: url }], questions: [], observations: [], unplanned: [], requirements: [],
+    targets: { T1: { target: { role: 'button', name: '^이전$' }, group: false, url }, T2: { target: { text: '건$' }, group: false, url } },
+    scenarios: [{ id: 'S1', title: '비활성', covers: ['F1'], start: { url }, steps: [{ id: 'S1.A1', op: 'click', target: 'T1' }],
+      checks: [{ id: 'S1.C1', after: 'start', target: 'T2', read: 'text', op: 'equals', expected: '0건', source: { kind: 'observed' }, precondition: true },
+        { id: 'S1.C2', after: 'S1.A1', target: 'T2', read: 'text', op: 'equals', expected_from: 'S1.C1', source: { kind: 'inferred', rule: 'disabled-inert', quote: '비활성 이전 버튼은 눌러도 결과가 그대로다' } }] }] };
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('disabled'), timeoutMs: 1500 });
+  const s = r.scenarios[0];
+  assert.equal(s.valid, true, s.invalid.join());
+  assert.equal(s.steps[0].status, 'ok', JSON.stringify(s.steps[0]));
+  assert.equal(s.checks.find(c => c.id === 'S1.C2')!.status, 'passed');
+});
+
+test('실행: 행동 뒤 화면 점검은 시작 화면에 없던 겹침·글자 대비 문제를 그 행동에 붙여 남기고, 정상 버전에서는 남기지 않는다', async () => {
+  const mk = (q: string) => `${origin}/themes.html${q}`;
+  const req = { kind: 'requirement' as const, id: 'R1', quote: '테마를 바꾸면 표시가 바뀐다' };
+  const p: Plan = { version: 1, textRead: 'name+content', features: [], questions: [], observations: [], unplanned: [],
+    requirements: [{ id: 'R1', text: '테마를 바꾸면 표시가 바뀐다' }],
+    targets: { T1: { target: { role: 'button', name: '^테마 바꾸기$' }, group: false, url: mk('') }, T2: { target: { role: 'button', name: '^계정$' }, group: false, url: mk('') },
+      T3: { target: { text: '^테마:' }, group: false, url: mk('') } },
+    startVerified: ['T1 ' + mk('?bug'), 'T2 ' + mk('?bug')],
+    scenarios: ['', '?bug'].map((q, i) => ({ id: `S${i + 1}`, title: q || 'ok', covers: ['R1'], start: { url: mk(q) },
+      steps: [{ id: `S${i + 1}.A1`, op: 'click' as const, target: 'T1' }, { id: `S${i + 1}.A2`, op: 'click' as const, target: 'T2' }],
+      checks: [{ id: `S${i + 1}.C1`, after: `S${i + 1}.A1`, target: 'T3', read: 'text' as const, op: 'equals' as const, expected: '테마: 어둡게', source: req }] })) };
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('themes'), timeoutMs: 1500 });
+  const [ok, bug] = r.scenarios;
+  assert.equal(ok.audits, undefined, JSON.stringify(ok.audits));
+  const kinds = (bug.audits ?? []).map(a => `${a.after}:${a.findings.map(f => f.kind).join(',')}`);
+  assert.ok(kinds.some(k => k.startsWith('S2.A1:') && k.includes('low-contrast-text')), kinds.join(' / '));
+  assert.ok(kinds.some(k => k.startsWith('S2.A2:') && k.includes('covered-control')), kinds.join(' / '));
+});
+
+test('실행: 버튼으로 이동한 같은 origin 주소가 404면 그 행동 뒤 이동 결함으로 남기고, 정상 이동은 남기지 않는다', async () => {
+  const mk = (q: string) => `${origin}/jsnav.html${q}`;
+  const p: Plan = { version: 1, textRead: 'name+content', features: [], questions: [], observations: [], unplanned: [],
+    requirements: [{ id: 'R1', text: '보내기를 누르면 다른 화면으로 간다' }],
+    targets: { T1: { target: { role: 'button', name: '^보내기$' }, group: false, url: mk('') } },
+    startVerified: ['T1 ' + mk('?bug')],
+    scenarios: ['', '?bug'].map((q, i) => ({ id: `S${i + 1}`, title: q || 'ok', covers: ['R1'], start: { url: mk(q) },
+      steps: [{ id: `S${i + 1}.A1`, op: 'click' as const, target: 'T1' }],
+      checks: [{ id: `S${i + 1}.C1`, after: `S${i + 1}.A1`, read: 'url' as const, op: 'contains' as const, expected: '.html', source: { kind: 'requirement' as const, id: 'R1', quote: '다른 화면으로 간다' } }] })) };
+  const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: runDir('jsnav'), timeoutMs: 1500 });
+  const [ok, bug] = r.scenarios;
+  assert.equal(ok.audits, undefined, JSON.stringify(ok.audits));
+  assert.deepEqual((bug.audits ?? []).map(a => [a.after, a.findings.map(f => `${f.kind} ${f.detail}`)]), [['S2.A1', ['broken-link 이동한 주소 /sent-done.html 가 404']]]);
+});
+
+test('실행 폴더를 상대 경로로 줘도 실행한다', async () => {
+  const p = plan();
+  p.scenarios = [p.scenarios[0]];
+  p.unplanned = p.requirements.filter(r => !p.scenarios[0].covers.includes(r.id)).map(r => ({ requirement: r.id, reason: '테스트' }));
+  const rel = `runs/test-relative-${Date.now()}`;
+  const cwd = process.cwd();
+  process.chdir(fileURLToPath(new URL('..', import.meta.url)));
+  try {
+    const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: rel, timeoutMs: 1500 });
+    assert.equal(r.scenarios[0].start, 'ok', JSON.stringify(r.scenarios[0]));
+  } finally { process.chdir(cwd); }
+});
+
+test('데스크톱 외부 출력 폴더에서도 고정한 실행 사본과 Playwright 의존성으로 검사한다', async () => {
+  const external = mkdtempSync(join(tmpdir(), 'webpilot-external-run-'));
+  try {
+    const p = plan();
+    p.scenarios = [p.scenarios[3]];
+    p.unplanned = p.requirements.filter(r => !p.scenarios[0].covers.includes(r.id)).map(r => ({ requirement: r.id, reason: '테스트' }));
+    const r = await runPlan({ plan: p, policy: { origins: [origin] }, runDir: join(external, 'result'), timeoutMs: 1500 });
+    const log = readFileSync(join(r.runDir, 'playwright.log'), 'utf8');
+    assert.equal(r.exitCode, 0, log);
+    assert.deepEqual(r.problems, [], log);
+    assert.equal(r.scenarios[0].start, 'ok', log);
+    assert.deepEqual(r.scenarios[0].checks.map(c => [c.status, c.actual]), [['passed', 'Textiles']], log);
+  } finally {
+    // mkdtempSync가 이 테스트 전용으로 만든 경로만 정리한다.
+    assert.ok(external.startsWith(join(tmpdir(), 'webpilot-external-run-')));
+    rmSync(external, { recursive: true, force: true });
+  }
+});

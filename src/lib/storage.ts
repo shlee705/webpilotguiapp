@@ -1,6 +1,8 @@
 import type { AgentActivity, AgentStep, BrowserAction, Capture, ChatMessage, Conversation, Finding, LoginCredentials, MessageRole, TokenUsage, TourPlan } from '../types';
 import { parsePromptCredentials, redactKnownCredentials } from './credentials';
 import { parseReportResult } from './reports';
+import { parseInspection } from './inspection';
+import { normalizeBackendLoginUrl, normalizeBackendOptions } from './backend-options';
 
 const CONVERSATIONS_KEY = 'webpilot.conversations.v1';
 
@@ -65,11 +67,21 @@ function parsePlan(value: unknown, restoring = false, known: Partial<LoginCreden
   if (!isObject(value)) return;
   const targetUrl = webUrl(value.targetUrl);
   if (!targetUrl || !validModel(value.model) || typeof value.prompt !== 'string' || !value.prompt.trim() || value.prompt.length > 16000) return;
-  const maxActions = value.maxActions === undefined ? 5 : value.maxActions;
-  if (typeof maxActions !== 'number' || !Number.isSafeInteger(maxActions) || maxActions < 1) return;
+  if (value.provider !== undefined && value.provider !== 'openai' && value.provider !== 'anthropic') return;
   const state = value.state;
   if (state !== 'pending' && state !== 'running' && state !== 'complete' && state !== 'cancelled' && state !== 'error') return;
-  return { targetUrl, prompt: safeText(value.prompt, known), model: value.model, maxActions, state: restoring && state === 'running' ? 'cancelled' : state,
+  let backendOptions;
+  try { if (value.backendOptions !== undefined) backendOptions = normalizeBackendOptions(value.backendOptions); } catch { return; }
+  let backendLoginUrl;
+  try {
+    const loginUrl = value.loginEnabled === true ? value.backendLoginUrl : undefined;
+    for (const credentials of known) normalizeBackendLoginUrl(loginUrl, targetUrl, credentials);
+    backendLoginUrl = normalizeBackendLoginUrl(loginUrl, targetUrl);
+  } catch { return; }
+  return { targetUrl, prompt: safeText(value.prompt, known), model: value.model, state: restoring && state === 'running' ? 'cancelled' : state,
+    ...(backendOptions ? { backendOptions } : {}),
+    ...(backendLoginUrl ? { backendLoginUrl } : {}),
+    ...(value.provider ? { provider: value.provider } : {}),
     ...(typeof value.loginEnabled === 'boolean' ? { loginEnabled: value.loginEnabled } : {}) };
 }
 
@@ -154,14 +166,18 @@ function parseMessage(value: unknown, restoring = true, known: Partial<LoginCred
   const captures = parseCaptures(value.captures);
   const activity = parseActivity(value.activity);
   const report = parseReportResult(value.report);
+  const inspection = parseInspection(value.inspection);
   // Previous demo messages remain available, but cannot be mistaken for API output.
-  const source = value.role === 'assistant' ? (value.source === 'local' ? 'local' : !model || value.source === 'legacy' ? 'legacy' : 'openai') : undefined;
+  const provider = value.provider === 'anthropic' || value.source === 'anthropic' ? 'anthropic' : 'openai';
+  const source = value.role === 'assistant' ? (value.source === 'local' ? 'local' : !model || value.source === 'legacy' ? 'legacy' : provider) : undefined;
   return {
     id: value.id, role: value.role, content: safeText(value.content, known), createdAt: value.createdAt, status: restoredStatus,
     ...(Array.isArray(value.steps) ? { steps: value.steps.map(parseStep).filter((step): step is AgentStep => !!step).map(step => ({ ...step, label: safeText(step.label, known) })) } : {}),
     ...(Array.isArray(value.findings) ? { findings: value.findings.map(parseFinding).filter((finding): finding is Finding => !!finding).map(finding => ({ ...finding, title: safeText(finding.title, known), description: safeText(finding.description, known) })) } : {}),
     ...(browserAction ? { browserAction: { ...browserAction, ...(browserAction.error ? { error: safeText(browserAction.error, known) } : {}) } } : {}),
     ...(model ? { model } : {}),
+    ...(model && (value.provider !== undefined || source === 'anthropic') ? { provider } : {}),
+    ...(inspection ? { inspection: restoring && !['complete', 'incomplete', 'error', 'cancelled'].includes(inspection.phase) ? { ...inspection, phase: 'cancelled' as const } : inspection } : {}),
     ...(usage ? { usage } : {}),
     ...(source ? { source } : {}),
     ...(captures ? { captures } : {}),

@@ -1,17 +1,19 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { ArrowUp, Check, CheckCheck, ChevronDown, ChevronRight, CircleHelp, Copy, ExternalLink, FileText, History, Link2, LoaderCircle, Maximize2, Minus, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings2, ShieldCheck, Square, Trash2, X } from 'lucide-react';
-import { DEFAULT_MODEL, type AiSettings, type AgentEvent, type ChatMessage, type Conversation, type Finding, type TourPlan, type LoginCredentials, type ReportResult } from './types';
+import { DEFAULT_MODEL, type AiSettings, type ApiProvider, type BackendRunOptions, type AgentEvent, type ChatMessage, type Conversation, type Finding, type TourPlan, type LoginCredentials, type ReportResult } from './types';
 import { createConversation, createMessage, loadConversations, saveConversations } from './lib/storage';
 import { sendChat } from './lib/transport';
 import { extractFirstWebUrl } from './lib/url';
-import { API_MODELS } from './lib/models';
-import SettingsPanel from './components/SettingsPanel';
+import { API_MODELS, profileForProvider, PROVIDERS } from './lib/models';
+import ApiSettingsDialog from './components/ApiSettingsDialog';
 import CaptureCard from './components/CaptureCard';
 import TourPlanCard from './components/TourPlanCard';
 import AgentActivityCard from './components/AgentActivityCard';
 import TourPlanEditor from './components/TourPlanEditor';
 import ReportCard from './components/ReportCard';
 import { loginCredentialsError, parsePromptCredentials, redactKnownCredentials } from './lib/credentials';
+import { backendOptionsFromSettings, normalizeBackendLoginUrl, normalizeBackendOptions } from './lib/backend-options';
+import { hasCompletedReport, isLegacyPartialReport, REPORT_GENERATED_MESSAGE } from './lib/reports';
 
 const modelName = (id: string) => API_MODELS.find(model => model.id === id)?.name ?? id;
 function siteOrigin(value: string) {
@@ -43,28 +45,33 @@ function Modal({ title, children, onClose }: { title: string; children: ReactNod
 
 const severityLabels: Record<Finding['severity'], string> = { critical: '심각', high: '높음', medium: '보통', low: '낮음', info: '정보' };
 function Message({ message, onStart, onEdit, onReportChange, busy, credentialsReady, animate, onEntered }: { message: ChatMessage; onStart: () => void; onEdit: () => void; onReportChange: (report: ReportResult) => void; busy: boolean; credentialsReady: boolean; animate: boolean; onEntered: () => void }) {
+  // Presentation only: original run metadata and saved report are unchanged.
+  const legacyPartialReport = isLegacyPartialReport(message);
+  const reportCompleted = hasCompletedReport(message);
+  const shownStatus = legacyPartialReport ? 'complete' : message.status;
+  const shownContent = legacyPartialReport ? REPORT_GENERATED_MESSAGE : message.content;
   const [entering] = useState(animate);
   useLayoutEffect(() => { onEntered(); }, []);
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(copyTimer.current), []);
   async function copy() {
-    try { await navigator.clipboard.writeText(message.content); setCopied(true); copyTimer.current = setTimeout(() => setCopied(false), 1800); } catch { setCopied(false); }
+    try { await navigator.clipboard.writeText(shownContent); setCopied(true); copyTimer.current = setTimeout(() => setCopied(false), 1800); } catch { setCopied(false); }
   }
   if (message.role === 'user') return <div className={`message user-message ${entering ? 'message-enter' : ''}`}><div className="user-message-wrap"><div className="user-bubble">{message.content}</div>{message.browserAction && <div className={`browser-action ${message.browserAction.status}`} role="status">{message.browserAction.status === 'opening' ? <LoaderCircle size={12} className="spin" /> : message.browserAction.status === 'opened' ? <ExternalLink size={12} /> : <CircleHelp size={12} />}<span>{message.browserAction.status === 'opening' ? 'Microsoft Edge를 여는 중…' : message.browserAction.status === 'opened' ? '전용 Edge에서 사이트를 열었어요' : message.browserAction.error ?? 'Microsoft Edge를 열지 못했습니다.'}</span></div>}</div></div>;
-  return <article className={`message assistant-message ${message.status === 'error' ? 'has-error' : ''} ${message.plan ? 'plan-message' : ''} ${entering ? 'message-enter' : ''}`}>
+  return <article className={`message assistant-message ${shownStatus === 'error' ? 'has-error' : ''} ${message.plan ? 'plan-message' : ''} ${entering ? 'message-enter' : ''}`}>
     <div className="assistant-byline"><Brand small /><span>WebPilot</span><span className="message-mode">{message.plan ? '탐색 준비' : message.model ? modelName(message.model) : '이전 기록'}</span></div>
     {!!message.steps?.length && !message.activity && <div className="agent-steps">{message.steps.map(step => <div key={step.id} className="agent-step">{step.state === 'complete' ? <Check size={15} /> : message.status === 'streaming' ? <LoaderCircle size={15} className="spin" /> : <Minus size={15} />}<span>{step.label}</span></div>)}</div>}
-    {message.content && <div className="message-content">{message.content}</div>}
+    {shownContent && <div className="message-content">{shownContent}</div>}
     {message.plan && <TourPlanCard plan={message.plan} onStart={onStart} onEdit={onEdit} disabled={busy} credentialsReady={credentialsReady} animate={entering} />}
     {!!message.captures?.length && <div className="capture-gallery">{message.captures.map(capture => <CaptureCard key={capture.id} capture={capture} />)}</div>}
-    {message.activity && <AgentActivityCard activity={message.activity} status={message.status} startedAt={message.createdAt} />}
+    {message.activity && <AgentActivityCard activity={message.activity} inspection={message.inspection} status={shownStatus} startedAt={message.createdAt} reportCompleted={reportCompleted} reportUnavailable={!!message.report && message.report.status !== 'ready'} />}
     {message.report && <ReportCard report={message.report} onChange={onReportChange} disabled={busy} />}
     {message.activity && !!message.steps?.length && <details className="tour-log"><summary>실제 동작 기록 {message.steps.length}개</summary><div className="agent-steps">{message.steps.map(step => <div className="agent-step" key={step.id}>{step.state === 'complete' ? <Check size={13} /> : message.status === 'streaming' ? <LoaderCircle size={13} className="spin" /> : <Minus size={13} />}<span>{step.label}</span></div>)}</div></details>}
     {message.status === 'streaming' && !message.activity && !message.content && !message.steps?.length && <div className="thinking"><span /><span /><span /><span className="sr-only">응답을 준비하고 있습니다</span></div>}
     {!!message.findings?.length && <div className="findings">{message.findings.map(finding => <div className="finding" key={finding.id}><span className={`severity severity-${finding.severity}`}>{severityLabels[finding.severity]}</span><strong>{finding.title}</strong><p>{finding.description}</p>{finding.url && /^https?:\/\//i.test(finding.url) && <a href={finding.url} target="_blank" rel="noreferrer">관련 페이지 <ExternalLink size={12} /></a>}</div>)}</div>}
     {message.status === 'cancelled' && !message.plan && <p className="message-note">응답 생성을 중지했습니다.</p>}
-    {message.status !== 'streaming' && message.content && !message.plan && <div className="message-actions"><button className="icon-button" onClick={copy} title={copied ? '복사됨' : '응답 복사'} aria-label={copied ? '복사됨' : '응답 복사'}>{copied ? <CheckCheck size={15} /> : <Copy size={15} />}</button><span>{message.usage ? `${message.usage.totalTokens.toLocaleString()} 토큰` : message.status === 'error' ? '요청을 다시 보내 주세요' : message.source === 'legacy' ? '이전 버전에서 저장한 응답' : 'OpenAI API 응답'}</span></div>}
+    {message.status !== 'streaming' && shownContent && !message.plan && <div className="message-actions"><button className="icon-button" onClick={copy} title={copied ? '복사됨' : '응답 복사'} aria-label={copied ? '복사됨' : '응답 복사'}>{copied ? <CheckCheck size={15} /> : <Copy size={15} />}</button><span>{message.usage ? `${message.usage.totalTokens.toLocaleString()} 토큰` : shownStatus === 'error' ? '요청을 다시 보내 주세요' : message.source === 'legacy' ? '이전 버전에서 저장한 응답' : `${PROVIDERS[message.provider ?? (message.source === 'anthropic' ? 'anthropic' : 'openai')].name} API 응답`}</span></div>}
   </article>;
 }
 
@@ -90,6 +97,7 @@ export default function App() {
   const [planError, setPlanError] = useState('');
   const [inputError, setInputError] = useState('');
   const planCredentials = useRef(new Map<string, LoginCredentials>());
+  const creatingPlan = useRef(false);
   const [urlValue, setUrlValue] = useState('');
   const [urlError, setUrlError] = useState('');
   const [storageError, setStorageError] = useState(false);
@@ -97,6 +105,7 @@ export default function App() {
   const [maximized, setMaximized] = useState(false);
   const [effectError, setEffectError] = useState('');
   const [aiSettings, setAiSettings] = useState<AiSettings | null>(null);
+  const [settingsProvider, setSettingsProvider] = useState<ApiProvider>('openai');
   const [aiError, setAiError] = useState('');
   const controllers = useRef(new Map<string, AbortController>());
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -116,6 +125,11 @@ export default function App() {
   const filtered = [...conversations].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).filter(item => (historyFilter !== 'reports' || item.messages.some(message => message.report)) && `${item.title} ${item.messages.map(m => m.content).join(' ')}`.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
   const groups = ['오늘', '어제', '이전 대화'].map(label => ({ label, items: filtered.filter(item => groupLabel(item.updatedAt) === label) })).filter(group => group.items.length);
   const selectedModel = aiSettings?.model ?? DEFAULT_MODEL;
+  const selectedProvider = aiSettings?.provider ?? 'openai';
+
+  function openSettings(provider: ApiProvider = selectedProvider) {
+    setSettingsProvider(provider); setModal('settings');
+  }
 
   async function refreshAiSettings() {
     if (!window.pilotDesktop?.getAiSettings) return;
@@ -169,17 +183,20 @@ export default function App() {
       if (event.type === 'usage') return { ...message, usage: event.usage };
       if (event.type === 'screenshot') return { ...message, captures: [...(message.captures ?? []), event.capture] };
       if (event.type === 'report') return { ...message, report: event.report };
+      if (event.type === 'inspection') return { ...message, inspection: { phase: event.phase, url: event.url } };
       if (event.type === 'activity') return { ...message, activity: { phase: event.phase, visitedCount: event.visitedCount, actionCount: event.actionCount, url: event.url, detail: event.detail } };
       return message;
     }) }));
   }
-  async function runRequest(chat: Conversation, requestMessages: ChatMessage[], assistantMessage: ChatMessage, userMessageId: string, options: { model: string; targetUrl?: string; maxActions?: number; planMessageId?: string; credentials?: LoginCredentials }) {
+  async function runRequest(chat: Conversation, requestMessages: ChatMessage[], assistantMessage: ChatMessage, userMessageId: string, options: { provider: ApiProvider; model: string; targetUrl?: string; backendOptions?: BackendRunOptions; backendTask?: string; backendLoginUrl?: string; planMessageId?: string; credentials?: LoginCredentials }) {
     const controller = new AbortController();
     controllers.current.set(chat.id, controller);
     setActiveIds(previous => [...previous, chat.id]);
     followScroll.current = true;
     let finalStatus: ChatMessage['status'] = 'complete';
     let errorContent = '';
+    let incompleteInspection = false;
+    let partialReportAttached = false;
     try {
       if (options.targetUrl && window.pilotDesktop?.beginOverlay) {
         try {
@@ -188,6 +205,8 @@ export default function App() {
         } catch { setEffectError('Esc 중지 키를 등록하지 못했습니다. 채팅의 응답 중지 버튼을 사용해 주세요.'); }
       }
       await sendChat({ conversationId: chat.id, messages: requestMessages, ...options, signal: controller.signal, onEvent: event => {
+        if (event.type === 'inspection') incompleteInspection = event.phase === 'incomplete';
+        if (event.type === 'report') partialReportAttached = event.report.status === 'ready' && event.report.inspectionCompleted === false;
         if (event.type === 'activity' && event.phase === 'finalizing') {
           void window.pilotDesktop?.endOverlay?.(chat.id).catch(() => {});
         }
@@ -198,7 +217,11 @@ export default function App() {
     }
     catch (error) {
       finalStatus = controller.signal.aborted ? 'cancelled' : 'error';
-      if (finalStatus === 'error') errorContent = '응답을 받지 못했습니다. ' + (error instanceof Error ? error.message : '잠시 후 다시 시도해 주세요.');
+      if (finalStatus === 'error') {
+        const incomplete = incompleteInspection || partialReportAttached;
+        const message = error instanceof Error ? error.message : incomplete ? '실제 검사에 미완료 항목이 있습니다.' : '잠시 후 다시 시도해 주세요.';
+        errorContent = (incomplete ? '' : '응답을 받지 못했습니다. ') + message;
+      }
     }
     finally {
       void window.pilotDesktop?.endOverlay?.(chat.id).catch(() => {});
@@ -221,12 +244,15 @@ export default function App() {
     const planMessage = conversation.messages[planIndex];
     const plan = planMessage?.plan;
     if (!plan || !['pending', 'error', 'cancelled'].includes(plan.state)) return;
-    if (!aiSettings?.keyConfigured) { setModal('settings'); return; }
+    const provider = plan.provider ?? 'openai';
+    if (!profileForProvider(aiSettings, provider)?.keyConfigured) { openSettings(provider); return; }
     const credentials = planCredentials.current.get(messageId);
     if (plan.loginEnabled && !credentials) { editTour(messageId); setPlanError('이번 작업에 사용할 로그인 계정을 다시 입력해 주세요.'); return; }
+    try { normalizeBackendLoginUrl(plan.backendLoginUrl, plan.targetUrl, plan.loginEnabled ? credentials : undefined); }
+    catch (error) { editTour(messageId); setPlanError(error instanceof Error ? error.message : '검사 주소와 로그인 주소를 확인해 주세요.'); return; }
     const userMessage = conversation.messages.slice(0, planIndex).reverse().find(message => message.role === 'user');
     if (!userMessage) return;
-    const assistantMessage: ChatMessage = { ...createMessage('assistant'), status: 'streaming', model: plan.model, source: 'openai', activity: { phase: 'reading', visitedCount: 0, actionCount: 0, url: plan.targetUrl } };
+    const assistantMessage: ChatMessage = { ...createMessage('assistant'), status: 'streaming', model: plan.model, provider, source: provider, activity: { phase: 'reading', visitedCount: 0, actionCount: 0, url: plan.targetUrl } };
     const confirmation = createMessage('user', plan.state === 'pending' ? '네, 시작해 주세요.' : '같은 설정으로 다시 시작해 주세요.');
     freshMessages.current.add(confirmation.id);
     freshMessages.current.add(assistantMessage.id);
@@ -236,20 +262,25 @@ export default function App() {
       if (message.id === userMessage.id) return { ...message, browserAction: { url: plan.targetUrl, status: 'opening' as const } };
       return message;
     }), confirmation, assistantMessage] }));
-    await runRequest(conversation, requestMessages, assistantMessage, userMessage.id, { model: plan.model, targetUrl: plan.targetUrl, maxActions: plan.maxActions, planMessageId: messageId, ...(plan.loginEnabled && credentials ? { credentials } : {}) });
+    await runRequest(conversation, requestMessages, assistantMessage, userMessage.id, { provider, model: plan.model, targetUrl: plan.targetUrl, backendOptions: normalizeBackendOptions(plan.backendOptions ?? {}), backendTask: plan.prompt, planMessageId: messageId, ...(plan.loginEnabled && credentials ? { credentials, ...(plan.backendLoginUrl ? { backendLoginUrl: plan.backendLoginUrl } : {}) } : {}) });
   }
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     const parsed = parsePromptCredentials(draft);
+    const sourceTargetUrl = parsed.credentials ? extractFirstWebUrl(draft) : null;
     if (parsed.hasCredentialFields) setDraft(parsed.text);
     if (parsed.error) { setInputError(parsed.error); return; }
+    try { if (sourceTargetUrl) normalizeBackendLoginUrl(undefined, sourceTargetUrl, parsed.credentials); }
+    catch (error) { setDraft(''); setInputError(error instanceof Error ? error.message : '검사 주소를 확인해 주세요.'); return; }
     setInputError('');
     const text = parsed.text.trim();
-    if ((!text && !parsed.credentials) || (currentId && controllers.current.has(currentId))) return;
+    if ((!text && !parsed.credentials) || creatingPlan.current || (currentId && controllers.current.has(currentId))) return;
     const pendingPlan = conversation?.messages.slice().reverse().find(message => message.plan?.state === 'pending');
-    if (parsed.credentials && !extractFirstWebUrl(text)) {
+    if (parsed.credentials && !sourceTargetUrl && !extractFirstWebUrl(text)) {
       if (!pendingPlan?.plan) { setInputError('계정과 함께 버그를 탐색할 사이트 URL을 입력해 주세요.'); return; }
+      try { normalizeBackendLoginUrl(pendingPlan.plan.backendLoginUrl, pendingPlan.plan.targetUrl, parsed.credentials); }
+      catch (error) { setInputError(error instanceof Error ? error.message : '검사 주소와 로그인 주소를 확인해 주세요.'); return; }
       planCredentials.current.set(pendingPlan.id, parsed.credentials);
       setConversations(previous => previous.map(item => item.id !== currentId ? item : { ...item, messages: item.messages.map(message => message.id === pendingPlan.id && message.plan ? { ...message, plan: { ...message.plan, loginEnabled: true } } : message) }));
       setDrafts(previous => ({ ...previous, [draftKey]: '' }));
@@ -260,13 +291,20 @@ export default function App() {
       await startTour(pendingPlan.id);
       return;
     }
-    const targetUrl = extractFirstWebUrl(text);
-    if (!targetUrl && !aiSettings?.keyConfigured) { setModal('settings'); return; }
+    const targetUrl = sourceTargetUrl ?? extractFirstWebUrl(text);
+    if (!targetUrl && !profileForProvider(aiSettings, selectedProvider)?.keyConfigured) { openSettings(); return; }
+    let backendOptions: BackendRunOptions | undefined;
+    if (targetUrl) {
+      creatingPlan.current = true;
+      try { backendOptions = backendOptionsFromSettings(await window.pilotDesktop?.getBackendSettings?.()); }
+      catch { setInputError('백엔드 검사 설정을 불러오지 못했습니다. QA팀의 실제 검사 백엔드 설정을 확인해 주세요.'); return; }
+      finally { creatingPlan.current = false; }
+    }
     const chat = conversation ?? createConversation();
     const userMessage = createMessage('user', text);
     const assistantMessage: ChatMessage = targetUrl
-      ? { ...createMessage('assistant', '요청하신 사이트를 확인했습니다. 아래 설정으로 진행합니다.'), source: 'local', plan: { targetUrl, prompt: text, model: selectedModel, maxActions: 10, loginEnabled: !!parsed.credentials, state: 'pending' } }
-      : { ...createMessage('assistant'), status: 'streaming', model: selectedModel, source: 'openai' };
+      ? { ...createMessage('assistant', '요청하신 사이트를 확인했습니다. 아래 설정으로 진행합니다.'), source: 'local', plan: { targetUrl, prompt: text, provider: selectedProvider, model: selectedModel, backendOptions, loginEnabled: !!parsed.credentials, state: 'pending' } }
+      : { ...createMessage('assistant'), status: 'streaming', model: selectedModel, provider: selectedProvider, source: selectedProvider };
     freshMessages.current.add(userMessage.id);
     freshMessages.current.add(assistantMessage.id);
     if (!hasMessages && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -284,7 +322,7 @@ export default function App() {
     const updated = { ...chat, title: chat.messages.length ? chat.title : text.replace(/\s+/g, ' ').slice(0, 60), updatedAt: new Date().toISOString(), messages: [...requestMessages, assistantMessage] };
     setConversations(previous => conversation ? previous.map(item => item.id === chat.id ? updated : item) : [updated, ...previous]);
     setCurrentId(chat.id);
-    if (!targetUrl) await runRequest(chat, requestMessages, assistantMessage, userMessage.id, { model: selectedModel });
+    if (!targetUrl) await runRequest(chat, requestMessages, assistantMessage, userMessage.id, { provider: selectedProvider, model: selectedModel });
   }
 
   function editTour(messageId: string) {
@@ -298,7 +336,7 @@ export default function App() {
     if (!editingPlan) return;
     const originChanged = siteOrigin(plan.targetUrl) !== siteOrigin(editingPlan.plan.targetUrl);
     if (originChanged) planCredentials.current.delete(editingPlan.messageId);
-    setEditingPlan(previous => previous ? { ...previous, plan, ...(originChanged ? { credentials: undefined } : {}) } : null);
+    setEditingPlan(previous => previous ? { ...previous, plan: originChanged ? { ...plan, backendLoginUrl: undefined } : plan, ...(originChanged ? { credentials: undefined } : {}) } : null);
     setPlanError(originChanged && plan.loginEnabled ? '대상 사이트가 변경되었습니다. 이 사이트에 사용할 계정을 다시 입력해 주세요.' : '');
   }
 
@@ -312,11 +350,15 @@ export default function App() {
       const parsed = parsePromptCredentials(editingPlan.plan.prompt);
       if (parsed.error) { setPlanError(parsed.error); setEditingPlan({ ...editingPlan, plan: { ...editingPlan.plan, prompt: parsed.text } }); return; }
       const credentials = parsed.credentials ?? editingPlan.credentials;
-      const plan = { ...editingPlan.plan, targetUrl: url.href, model: editingPlan.plan.model.trim(), prompt: redactKnownCredentials(parsed.text.trim(), credentials), loginEnabled: !!parsed.credentials || editingPlan.plan.loginEnabled };
+      let backendOptions: BackendRunOptions;
+      try { backendOptions = normalizeBackendOptions(editingPlan.plan.backendOptions ?? {}); }
+      catch (error) { setPlanError(error instanceof Error ? error.message : '백엔드 검사 설정을 확인해 주세요.'); return; }
+      const plan = { ...editingPlan.plan, backendOptions, targetUrl: url.href, model: editingPlan.plan.model.trim(), prompt: redactKnownCredentials(parsed.text.trim(), credentials), loginEnabled: !!parsed.credentials || editingPlan.plan.loginEnabled };
+      try { plan.backendLoginUrl = normalizeBackendLoginUrl(plan.loginEnabled ? plan.backendLoginUrl : undefined, url.href, credentials); }
+      catch (error) { setPlanError(error instanceof Error ? error.message : '로그인 URL을 확인해 주세요.'); return; }
       const credentialError = plan.loginEnabled ? loginCredentialsError(credentials) : undefined;
       if (credentialError) { setPlanError(credentialError); return; }
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,199}$/.test(plan.model)) { setPlanError('올바른 모델 ID를 입력해 주세요. 예: gpt-6-luna'); return; }
-      if (!Number.isSafeInteger(plan.maxActions) || plan.maxActions < 1) { setPlanError('탐색 횟수는 1 이상의 정수로 입력해 주세요.'); return; }
       if (!plan.prompt) throw new Error();
       setConversations(previous => previous.map(item => item.id !== editingPlan.conversationId ? item : { ...item, updatedAt: new Date().toISOString(), messages: item.messages.map(message => message.id === editingPlan.messageId && message.plan && ['pending', 'error', 'cancelled'].includes(message.plan.state) ? { ...message, plan: { ...plan, state: 'pending' as const } } : message) }));
       if (plan.loginEnabled && credentials) planCredentials.current.set(editingPlan.messageId, credentials); else planCredentials.current.delete(editingPlan.messageId);
@@ -324,16 +366,34 @@ export default function App() {
     } catch { setPlanError('올바른 HTTP(S) 주소와 버그 탐색 요청을 입력해 주세요.'); }
   }
   function updateReport(conversationId: string, messageId: string, report: ReportResult) {
-    setConversations(previous => previous.map(item => item.id !== conversationId ? item : { ...item, messages: item.messages.map(message => {
+    setConversations(previous => previous.map(item => {
+      if (item.id !== conversationId) return item;
+      const messageIndex = item.messages.findIndex(message => message.id === messageId);
+      const prior = item.messages[messageIndex];
+      const recovered = report.status === 'ready' && typeof report.inspectionCompleted === 'boolean' && !!report.runId
+        && report.runId === prior?.report?.runId && prior.status === 'error' && prior.report.status !== 'ready';
+      let planIndex = -1;
+      if (recovered) for (let index = messageIndex - 1; index >= 0; index--) {
+        if (item.messages[index].plan) { planIndex = index; break; }
+      }
+      return { ...item, messages: item.messages.map((message, index) => {
+      if (index === planIndex && message.plan) return { ...message, plan: { ...message.plan, state: 'complete' as const } };
       if (message.id !== messageId) return message;
       const completion = '버그 탐색을 완료했고 보고서를 완성했어요.';
+      if (recovered) return { ...message, report, content: report.inspectionCompleted ? completion : REPORT_GENERATED_MESSAGE, status: 'complete' as const,
+        ...(message.activity ? { activity: { ...message.activity, phase: 'complete' as const } } : {}),
+        ...(message.inspection ? { inspection: { ...message.inspection, phase: report.inspectionCompleted ? 'complete' as const : 'incomplete' as const } } : {}) };
+      if (message.status === 'complete' && report.runId && report.inspectionCompleted === false) {
+        return { ...message, report, content: report.status === 'ready' ? REPORT_GENERATED_MESSAGE : '보고서를 불러오지 못했어요. 보고서 파일을 다시 확인해 주세요.' };
+      }
       const unavailable = '웹사이트 버그 탐색을 마쳤지만 보고서를 불러오지 못했어요. 보고서를 다시 확인해 주세요.';
       const body = message.content.replace(/^(?:버그 탐색을 완료했고 보고서를 완성했어요\.|웹사이트 버그 탐색을 마쳤지만[^\n]*)(?:\n\n)?/, '');
-      const content = message.status === 'complete'
+      const content = message.status === 'complete' && (!report.runId || report.inspectionCompleted === true)
         ? [report.status === 'ready' ? completion : unavailable, body].filter(Boolean).join('\n\n')
         : message.content;
       return { ...message, report, content };
-    }) }));
+    }) };
+    }));
   }
   function deleteConversation() {
     if (!deleteId) return;
@@ -376,12 +436,12 @@ export default function App() {
         <button className="history-select" onClick={() => { setCurrentId(item.id); followScroll.current = true; }} title={item.title}>{activeIds.includes(item.id) && <LoaderCircle size={12} className="spin history-running" />}<span className="history-item-copy"><strong>{item.title}</strong><small>{conversationSite(item)}</small></span></button><button className="history-delete icon-button" aria-label={`${item.title} 대화 삭제`} onClick={() => setDeleteId(item.id)}><Trash2 size={12} /></button>
       </div>)}</div>) : <div className="history-empty">{historyFilter === 'reports' ? <FileText size={20} strokeWidth={1.4} /> : <History size={20} strokeWidth={1.4} />}<p>{search ? '검색 결과가 없어요' : historyFilter === 'reports' ? '아직 보고서가 없어요' : '아직 대화가 없어요'}</p><span>{search ? '다른 검색어로 찾아보세요.' : historyFilter === 'reports' ? '완료된 보고서를 여기서 다시 열 수 있어요.' : '새로운 검사를 시작해 보세요.'}</span></div>)}</div>
       <div className="sidebar-bottom">
-        <button className="account-button" aria-label="QA팀 설정" title="QA팀 · API 키 및 모델 설정" onClick={() => setModal('settings')}><span className="account-avatar" aria-hidden="true">QA</span><span className="account-name">QA팀</span><Settings2 size={14} className="account-settings-icon" /></button>
+        <button className="account-button" aria-label="QA팀 설정" title="QA팀 · API 키 및 모델 설정" onClick={() => openSettings()}><span className="account-avatar" aria-hidden="true">QA</span><span className="account-name">QA팀</span><Settings2 size={14} className="account-settings-icon" /></button>
         <button className="account-help" aria-label="도움말" title="도움말" onClick={() => setModal('help')}><CircleHelp size={14} /></button>
       </div>
     </aside>
     <main className="main-panel">
-      <header className="topbar"><div className="topbar-left">{!sidebarOpen && <button className="icon-button" aria-label="사이드바 열기" onClick={() => setSidebarOpen(true)}><PanelLeftOpen size={16} /></button>}{hasMessages && <span className="topbar-title">{conversation?.title}</span>}</div><div className="topbar-right"><button className="mode-badge" onClick={() => setModal('settings')}><span />{aiSettings?.keyConfigured ? modelName(selectedModel) : 'API 연결'}<ChevronDown size={10} /></button>{window.pilotDesktop && <div className="window-controls"><button aria-label="창 최소화" onClick={() => window.pilotDesktop?.minimize()}><Minus size={14} /></button><button aria-label={maximized ? '창 복원' : '창 최대화'} onClick={() => void window.pilotDesktop?.toggleMaximize()}><Maximize2 size={12} /></button><button className="window-close" aria-label="앱 닫기" onClick={() => window.pilotDesktop?.close()}><X size={16} /></button></div>}</div></header>
+      <header className="topbar"><div className="topbar-left">{!sidebarOpen && <button className="icon-button" aria-label="사이드바 열기" onClick={() => setSidebarOpen(true)}><PanelLeftOpen size={16} /></button>}{hasMessages && <span className="topbar-title">{conversation?.title}</span>}</div><div className="topbar-right"><button className="mode-badge" onClick={() => openSettings()}><span />화면 표현 · {aiSettings?.keyConfigured ? modelName(selectedModel) : 'API 연결'}<ChevronDown size={10} /></button>{window.pilotDesktop && <div className="window-controls"><button aria-label="창 최소화" onClick={() => window.pilotDesktop?.minimize()}><Minus size={14} /></button><button aria-label={maximized ? '창 복원' : '창 최대화'} onClick={() => void window.pilotDesktop?.toggleMaximize()}><Maximize2 size={12} /></button><button className="window-close" aria-label="앱 닫기" onClick={() => window.pilotDesktop?.close()}><X size={16} /></button></div>}</div></header>
       {storageError && <div className="storage-warning" role="alert">저장 공간을 사용할 수 없어 대화가 보관되지 않을 수 있습니다.</div>}
       {aiError && <div className="storage-warning" role="alert">{aiError}</div>}{effectError && <div className="storage-warning" role="alert">{effectError}</div>}
       {hasMessages ? <>
@@ -393,7 +453,7 @@ export default function App() {
       {departingHero && <div className="welcome-departure" style={departingHero} aria-hidden="true"><WelcomeHero /></div>}
     </main>
     {editingPlan && <Modal title="버그 탐색 설정 바꾸기" onClose={() => setEditingPlan(null)}><TourPlanEditor plan={editingPlan.plan} onChange={changeTourPlan} onSubmit={saveTour} error={planError} credentials={editingPlan.credentials} onCredentialsChange={credentials => setEditingPlan(previous => previous ? { ...previous, credentials } : null)} /></Modal>}
-    {modal === 'settings' && <Modal title="API 및 앱 설정" onClose={() => setModal(null)}><SettingsPanel settings={aiSettings} onSaved={settings => { setAiSettings(settings); setAiError(''); }} running={activeIds.length > 0} /></Modal>}
+    {modal === 'settings' && <Modal title="API 및 앱 설정" onClose={() => setModal(null)}><ApiSettingsDialog settings={aiSettings} initialProvider={settingsProvider} onSaved={settings => { setAiSettings(settings); setAiError(''); }} running={activeIds.length > 0} /></Modal>}
     {modal === 'help' && <Modal title="WebPilot 시작하기" onClose={() => setModal(null)}><div className="help-content"><p>테스트할 웹사이트 주소와 확인하고 싶은 내용을 채팅으로 보내세요. 에이전트의 진행 과정과 응답이 대화에 표시됩니다.</p><p className="help-callout">URL을 보내면 먼저 버그 탐색 설정 카드가 표시됩니다. 설정을 확인하고 시작하기를 누르면 Microsoft Edge가 열립니다. 여러 URL이 있으면 첫 번째 주소를 엽니다. API 키를 연결하면 같은 출처의 페이지 정보를 모델에 전달하고 실제 클릭·입력·이동을 수행합니다. 프롬프트에 아이디: / 비밀번호: 를 각각 한 줄로 넣거나 버그 탐색 설정에서 계정을 지정하면 로그인도 진행합니다. 버그 판정은 하지 않습니다.</p><dl><div><dt>새 채팅</dt><dd><kbd>Ctrl</kbd> + <kbd>N</kbd></dd></div><div><dt>대화 검색</dt><dd><kbd>Ctrl</kbd> + <kbd>K</kbd></dd></div><div><dt>메시지 보내기</dt><dd><kbd>Enter</kbd></dd></div><div><dt>줄 바꾸기</dt><dd><kbd>Shift</kbd> + <kbd>Enter</kbd></dd></div></dl><p className="muted-note">대화는 현재 앱에 저장됩니다. 왼쪽 목록에서 다시 열거나 삭제할 수 있습니다.</p></div></Modal>}
     {modal === 'url' && <Modal title="웹사이트 추가" onClose={() => setModal(null)}><form onSubmit={addUrl} className="url-form"><label htmlFor="site-url">살펴볼 웹사이트 주소</label><div className="url-input"><Link2 size={17} /><input id="site-url" value={urlValue} onChange={event => { setUrlValue(event.target.value); setUrlError(''); }} placeholder="https://example.com" autoFocus /></div>{urlError && <p className="field-error" role="alert">{urlError}</p>}<p className="muted-note">주소를 메시지에 추가한 뒤, 원하는 테스트를 함께 요청하세요.</p><button className="primary-button" disabled={!urlValue.trim()}>메시지에 추가</button></form></Modal>}
     {deleteId && <Modal title="대화를 삭제할까요?" onClose={() => setDeleteId(null)}><p className="delete-description">이 기기에 저장된 대화와 응답이 삭제됩니다. 삭제한 대화는 복구할 수 없습니다.</p><div className="dialog-actions"><button className="secondary-button" onClick={() => setDeleteId(null)}>취소</button><button className="danger-button" onClick={deleteConversation}>대화 삭제</button></div></Modal>}

@@ -47,7 +47,7 @@
   font-weight: 400;
 }
 
-.reference-plan .tour-plan-label-column { width: 100px; }
+.reference-plan .tour-plan-label-column { width: 124px; }
 
 .reference-plan .tour-plan-table tbody th,
 .reference-plan .tour-plan-table tbody td {
@@ -61,7 +61,7 @@
   font-weight: 400;
 }
 
-.reference-plan .tour-plan-table tbody th { color: #75757f; }
+.reference-plan .tour-plan-table tbody th { color: #75757f; word-break: keep-all; overflow-wrap: normal; }
 .reference-plan .tour-plan-table tbody td { color: #4b4b55; }
 .reference-plan .tour-plan-table tbody tr:last-child > * { border-bottom: 0; }
 .reference-plan .tour-plan-url { color: #4b4b55; font-size: inherit; }
@@ -120,7 +120,7 @@
 .reference-plan--animate .reference-plan-frame { animation: plan-card-enter 240ms ease-out both; }
 .reference-plan--animate .tour-plan-table tbody tr {
   animation: plan-row-enter 240ms ease-out both;
-  animation-delay: calc(120ms + var(--plan-row, 0) * 150ms);
+  animation-delay: calc(120ms + var(--plan-row, 0) * 100ms);
 }
 .reference-plan--animate .tour-plan-table tbody tr:nth-child(1) { --plan-row: 0; }
 .reference-plan--animate .tour-plan-table tbody tr:nth-child(2) { --plan-row: 1; }
@@ -130,7 +130,12 @@
 .reference-plan--animate .tour-plan-table tbody tr:nth-child(6) { --plan-row: 5; }
 .reference-plan--animate .tour-plan-table tbody tr:nth-child(7) { --plan-row: 6; }
 .reference-plan--animate .tour-plan-table tbody tr:nth-child(8) { --plan-row: 7; }
-.reference-plan--animate .tour-plan-confirm { animation: plan-row-enter 240ms ease-out 1370ms both; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(9) { --plan-row: 8; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(10) { --plan-row: 9; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(11) { --plan-row: 10; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(12) { --plan-row: 11; }
+.reference-plan--animate .tour-plan-table tbody tr:nth-child(13) { --plan-row: 12; }
+.reference-plan--animate .tour-plan-confirm { animation: plan-row-enter 240ms ease-out 1570ms both; }
 .reference-plan--animate .tour-plan-confirm:focus-within { animation: none; }
 
 @keyframes plan-card-enter {

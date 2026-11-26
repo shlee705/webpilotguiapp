@@ -6,13 +6,20 @@ async function nativeFixture(page: Page, keyConfigured = true, pdfSize = { width
     const listeners = new Set<(details: any) => void>();
     const pending = new Map<string, { timers: ReturnType<typeof setTimeout>[]; resolve: (result: any) => void }>();
     const stored = sessionStorage.getItem('native-fixture-settings');
-    const settings = stored ? JSON.parse(stored) : {
-      model: 'gpt-6-luna', keyConfigured: configured, keyHint: configured ? '••••test' : '', storage: 'encrypted',
-      usage: { month: '2026-11', inputTokens: 200, outputTokens: 157, totalTokens: 357, requests: 2, untrackedRequests: 0 },
-    };
-    const copy = () => JSON.parse(JSON.stringify(settings));
+    const settings = stored ? JSON.parse(stored) : { provider: 'openai', profiles: {
+      openai: { model: 'gpt-6-luna', keyConfigured: configured, keyHint: configured ? '••••test' : '', storage: 'encrypted', usage: { month: '2026-11', inputTokens: 200, outputTokens: 157, totalTokens: 357, requests: 2, untrackedRequests: 0 } },
+      anthropic: { model: 'claude-haiku-5-5', keyConfigured: false, keyHint: '', storage: 'encrypted', usage: { month: '2026-11', inputTokens: 0, outputTokens: 0, totalTokens: 0, requests: 0, untrackedRequests: 0 } },
+    } };
+    const copy = () => JSON.parse(JSON.stringify({ ...settings, ...settings.profiles[settings.provider] }));
+    const emptyBackend = { keyConfigured: false, savedKeyConfigured: false, keyHint: '', storage: 'env-file', source: 'none' };
+    const backendSettings = { provider: 'anthropic', profiles: {
+      openai: { ...emptyBackend, models: { plan: 'gpt-6.2-sol', triage: 'gpt-6-luna' } },
+      anthropic: { ...emptyBackend, models: { plan: 'claude-opus-5-5', triage: 'claude-sonnet-5-5' } },
+    } };
+    host.__backendSettings = backendSettings;
+    const backendCopy = () => JSON.parse(JSON.stringify({ ...backendSettings, ...backendSettings.profiles[backendSettings.provider as 'openai' | 'anthropic'] }));
     const emit = (requestId: string, event: any) => { for (const listener of listeners) listener({ requestId, event }); };
-    const calls = host.__native = { requests: [] as any[], cancelled: [] as string[], saved: [] as any[], tested: [] as any[], captureReads: [] as string[], overlayStarts: [] as string[], overlayEnds: [] as string[], openedUrls: [] as string[], reportOpens: [] as string[], reportReads: [] as string[], reportRefreshes: 0, reportId: '12345678-1234-4234-8234-123456789abc', staleReportId: '', reportUnavailable: false, openReportFails: false, readReportFails: false, failNext: false, holdActivity: false };
+    const calls = host.__native = { requests: [] as any[], cancelled: [] as string[], saved: [] as any[], tested: [] as any[], backendSaved: [] as any[], backendTested: [] as any[], backendReadFails: false, captureReads: [] as string[], overlayStarts: [] as string[], overlayEnds: [] as string[], openedUrls: [] as string[], reportOpens: [] as string[], reportReads: [] as string[], reportRefreshes: 0, reportId: '12345678-1234-4234-8234-123456789abc', staleReportId: '', reportUnavailable: false, openReportFails: false, readReportFails: false, failNext: false, holdActivity: false };
     // A real two-page PDF fixture with deterministic graphics, correct byte
     // offsets and no downloaded assets or user report contents.
     const firstPage = '0.14 0.15 0.18 rg 30 410 340 90 re f\nBT /F1 24 Tf 30 530 Td (WebPilot Report) Tj ET\nBT /F1 14 Tf 30 370 Td (First page - local PDF fixture) Tj ET';
@@ -42,19 +49,32 @@ async function nativeFixture(page: Page, keyConfigured = true, pdfSize = { width
       beginOverlay: async (id: string) => { calls.overlayStarts.push(id); return { ok: true }; },
       endOverlay: async (id: string) => { calls.overlayEnds.push(id); return { ok: true }; },
       getAiSettings: async () => copy(),
+      getBackendSettings: async () => { if (calls.backendReadFails) throw new Error('fixture-read-failure'); return backendCopy(); },
+      saveBackendSettings: async (options: any) => {
+        calls.backendSaved.push(options);
+        backendSettings.provider = options.provider ?? backendSettings.provider;
+        const profile = backendSettings.profiles[backendSettings.provider as 'openai' | 'anthropic'];
+        if (options.models) profile.models = { ...options.models };
+        if (options.apiKey) { profile.savedKeyConfigured = true; profile.keyConfigured = true; profile.keyHint = '••••back'; if (profile.source !== 'environment') profile.source = 'file'; }
+        if (options.forgetKey) { profile.savedKeyConfigured = false; profile.keyHint = ''; if (profile.source !== 'environment') { profile.keyConfigured = false; profile.source = 'none'; } }
+        return backendCopy();
+      },
+      testBackendConnection: async (options: any) => { calls.backendTested.push(options); return { ok: true }; },
       refreshReport: async () => { calls.reportRefreshes++; return report(); },
       openReport: async (id: string) => { calls.reportOpens.push(id); return calls.openReportFails ? { ok: false, error: '저장된 보고서를 찾을 수 없습니다.' } : { ok: true }; },
       readReport: async (id: string) => { calls.reportReads.push(id); return calls.readReportFails || id === calls.staleReportId ? { ok: false, error: '저장된 보고서를 찾을 수 없습니다.' } : { ok: true, data: pdfBytes.slice() }; },
       saveAiSettings: async (options: any) => {
         calls.saved.push(options);
-        settings.model = options.model;
-        if (options.apiKey) { settings.keyConfigured = true; settings.keyHint = '••••test'; }
-        if (options.forgetKey) { settings.keyConfigured = false; settings.keyHint = ''; }
+        settings.provider = options.provider ?? 'openai';
+        const profile = settings.profiles[settings.provider];
+        profile.model = options.model;
+        if (options.apiKey) { profile.keyConfigured = true; profile.keyHint = settings.provider === 'anthropic' ? '••••anth' : '••••test'; }
+        if (options.forgetKey) { profile.keyConfigured = false; profile.keyHint = ''; }
         // Native settings survive reload; even this fixture persists no API key.
         sessionStorage.setItem('native-fixture-settings', JSON.stringify(settings));
         return copy();
       },
-      testAiConnection: async (options: any) => { calls.tested.push(options); return { ok: true, models: ['gpt-6-luna', 'gpt-6.2-sol'] }; },
+      testAiConnection: async (options: any) => { calls.tested.push(options); return { ok: true, models: options.provider === 'anthropic' ? ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'] : ['gpt-6-luna', 'gpt-6.2-sol'] }; },
       onAiEvent: (listener: (details: any) => void) => { listeners.add(listener); return () => listeners.delete(listener); },
       getCapture: async (id: string) => {
         calls.captureReads.push(id);
@@ -77,7 +97,8 @@ async function nativeFixture(page: Page, keyConfigured = true, pdfSize = { width
           schedule(180, () => emit(request.requestId, { type: 'activity', phase: 'thinking', actionCount: 0, visitedCount: 1, url: request.targetUrl }));
           schedule(350, () => emit(request.requestId, { type: 'activity', phase: 'acting', actionCount: 1, visitedCount: 1, url: request.targetUrl }));
           if (calls.holdActivity) return;
-          schedule(700, () => emit(request.requestId, { type: 'activity', phase: 'finalizing', actionCount: request.maxActions ?? 5, visitedCount: 3, url: request.targetUrl }));
+          // This observed fixture total is independent of any request quota.
+          schedule(700, () => emit(request.requestId, { type: 'activity', phase: 'finalizing', actionCount: 5, visitedCount: 3, url: request.targetUrl }));
           if (request.messages.at(-1)?.content.includes('정리 중 중단')) return;
           schedule(1600, () => {
             emit(request.requestId, { type: 'report', report: report() });
@@ -91,9 +112,10 @@ async function nativeFixture(page: Page, keyConfigured = true, pdfSize = { width
         schedule(request.targetUrl ? 1900 : 1000, () => {
           emit(request.requestId, { type: 'status', id: 'request', label: 'AI 응답 완료', state: 'complete' });
           emit(request.requestId, { type: 'usage', usage: { inputTokens: 40, outputTokens: 20, totalTokens: 60 } });
-          settings.usage.inputTokens += 40; settings.usage.outputTokens += 20; settings.usage.totalTokens += 60; settings.usage.requests += 1;
+          const usage = settings.profiles[request.provider ?? 'openai'].usage;
+          usage.inputTokens += 40; usage.outputTokens += 20; usage.totalTokens += 60; usage.requests += 1;
           sessionStorage.setItem('native-fixture-settings', JSON.stringify(settings));
-          if (request.targetUrl) emit(request.requestId, { type: 'activity', phase: 'complete', actionCount: request.maxActions ?? 5, visitedCount: 3, url: request.targetUrl });
+          if (request.targetUrl) emit(request.requestId, { type: 'activity', phase: 'complete', actionCount: 5, visitedCount: 3, url: request.targetUrl });
           emit(request.requestId, { type: 'done' });
           pending.delete(request.requestId);
           resolve({ ok: true });
@@ -113,6 +135,168 @@ async function send(page: Page, content: string) {
   await page.getByRole('textbox', { name: '메시지', exact: true }).fill(content);
   await page.getByRole('button', { name: '메시지 보내기' }).click();
 }
+
+async function backendFixture(page: Page) {
+  await nativeFixture(page);
+  await page.goto('/');
+  await page.evaluate(() => {
+    const host = window as any;
+    let listener: (payload: any) => void;
+    let requestId: string;
+    let finish: (value: any) => void;
+    const runId = 'c2eb104a-6476-4b89-ace1-b2a01bcb9282';
+    const report = { status: 'ready', id: host.__native.reportId, name: 'report.pdf', size: 2048, updatedAt: '2026-11-26T00:00:00.000Z', runId, inspectionCompleted: true };
+    host.__backend = {
+      runId, report, refreshed: [] as string[],
+      emit: (event: any) => listener({ requestId, event }),
+      finish: (value: any) => finish(value),
+    };
+    host.pilotDesktop.onAiEvent = (callback: typeof listener) => { listener = callback; return () => {}; };
+    host.pilotDesktop.startAiChat = (request: any) => {
+      requestId = request.requestId;
+      host.__native.requests.push(request);
+      return new Promise(resolve => { finish = resolve; });
+    };
+    host.pilotDesktop.refreshReport = async (id: string) => {
+      host.__backend.refreshed.push(id);
+      return { ...host.__backend.report };
+    };
+  });
+}
+
+test('legacy partial report shows report generation complete while preserving inspection scope on refresh', async ({ page }) => {
+  test.setTimeout(60000);
+  await backendFixture(page);
+  await send(page, 'https://example.com 검색 기능 확인');
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
+  await page.evaluate(() => {
+    const backend = (window as any).__backend;
+    backend.emit({ type: 'inspection', phase: 'executing', url: 'https://example.com/search' });
+    backend.emit({ type: 'activity', phase: 'acting', actionCount: 1, visitedCount: 1, url: 'https://example.com/search' });
+  });
+  await expect(page.locator('.inspection-status')).toContainText('검사 계획 실행');
+  await expect(page.locator('.inspection-status small')).toHaveAttribute('title', 'https://example.com/search');
+  await expect(page.locator('.agent-activity-active')).toBeVisible();
+  await expect(page.locator('.agent-activity-location')).toHaveAttribute('title', 'https://example.com/search');
+  await expect(page.locator('.agent-activity-stage-current')).toHaveText('실제 조작');
+  await expect(page.locator('.agent-activity-copy')).toContainText('선택한 요소를 실제로 클릭하고 입력하고 있습니다');
+  await expect(page.locator('.tour-plan-complete, .agent-activity-done-label')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '보고서 열기', exact: true })).toHaveCount(0);
+  await page.evaluate(() => {
+    const backend = (window as any).__backend;
+    backend.emit({ type: 'inspection', phase: 'judging', url: 'https://example.com/search' });
+    backend.emit({ type: 'activity', phase: 'reading', actionCount: 2, visitedCount: 1, url: 'https://example.com/search', detail: '실제 검사 결과를 기다리고 있습니다' });
+  });
+  await expect(page.locator('.inspection-status')).toContainText('결과 판정·재현');
+  await expect(page.locator('.agent-activity-count')).toContainText('화면 표현');
+  await expect(page.getByRole('button', { name: '보고서 열기', exact: true })).toHaveCount(0);
+  await page.evaluate(() => {
+    const backend = (window as any).__backend;
+    backend.report.inspectionCompleted = false;
+    backend.emit({ type: 'inspection', phase: 'incomplete', url: 'https://example.com/search' });
+    backend.emit({ type: 'report', report: backend.report });
+    backend.emit({ type: 'delta', text: '일부 검사를 완료하지 못해 현재까지의 결과 보고서를 첨부했어요.' });
+    backend.finish({ ok: false, error: '실제 검사에 미완료 항목이 있습니다.' });
+    (window as any).__native.readReportFails = true;
+  });
+  await expect(page.locator('.inspection-status')).toContainText('보고서 생성 완료');
+  await expect(page.locator('.message-content').last()).not.toContainText('완료했고');
+  await expect(page.locator('.message-content').last()).toContainText('보고서 생성을 완료했어요.');
+  await expect(page.locator('.message-content').last()).not.toContainText('응답을 받지 못했습니다');
+  await expect(page.locator('.assistant-message.has-error')).toHaveCount(0);
+  await expect(page.locator('.agent-activity-summary h3')).toHaveText('보고서 생성을 완료했습니다');
+  await expect(page.locator('.agent-activity-summary')).toContainText('화면 표현 · 방문한 페이지 1곳 · 수행한 동작 2회');
+  await page.screenshot({ path: 'screenshots/report-generated-complete.png', animations: 'disabled' });
+  await page.getByRole('button', { name: '보고서 열기', exact: true }).click();
+  await page.getByRole('button', { name: '보고서 다시 불러오기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__backend.refreshed)).toEqual(['c2eb104a-6476-4b89-ace1-b2a01bcb9282']);
+  await expect(page.locator('.message-content').last()).not.toContainText('완료했고');
+  await page.reload();
+  await page.locator('.history-select').first().click();
+  await expect(page.locator('.inspection-status')).toContainText('보고서 생성 완료');
+  await expect(page.locator('.report-card')).toContainText('검사 범위는 보고서에서 확인');
+  await expect(page.locator('.message-content').last()).not.toContainText('응답을 받지 못했습니다');
+  await expect(page.locator('.agent-activity-summary')).toContainText('화면 표현');
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('webpilot.conversations.v1')!).at(0).messages.at(-1));
+  expect(saved.report.inspectionCompleted).toBe(false);
+  expect(saved.inspection.phase).toBe('incomplete');
+  expect(saved.status).toBe('error');
+});
+
+test('new partial run completes report delivery without claiming complete inspection', async ({ page }) => {
+  await backendFixture(page);
+  await send(page, 'https://example.com 검색 기능 확인');
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
+  await page.evaluate(() => {
+    const backend = (window as any).__backend;
+    backend.report.inspectionCompleted = false;
+    backend.emit({ type: 'report', report: backend.report });
+    backend.emit({ type: 'inspection', phase: 'incomplete', url: 'https://example.com/search' });
+    backend.emit({ type: 'activity', phase: 'complete', actionCount: 59, visitedCount: 21, url: 'https://example.com/search' });
+    backend.emit({ type: 'delta', text: '보고서 생성을 완료했어요. 검사 범위와 상세 결과는 첨부된 보고서에서 확인해 주세요.' });
+    backend.finish({ ok: true });
+  });
+  await expect(page.locator('.message-content').last()).toContainText('보고서 생성을 완료했어요.');
+  await expect(page.locator('.agent-activity-summary h3')).toHaveText('보고서 생성을 완료했습니다');
+  await expect(page.locator('.assistant-message.has-error')).toHaveCount(0);
+  await expect(page.locator('.tour-plan-state')).toHaveText('실행 종료');
+  await expect(page.getByRole('button', { name: '보고서 열기', exact: true })).toBeEnabled();
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('webpilot.conversations.v1')!).at(0).messages.at(-1));
+  expect(saved.report.inspectionCompleted).toBe(false);
+  expect(saved.inspection.phase).toBe('incomplete');
+  expect(saved.status).toBe('complete');
+  await page.screenshot({ path: 'screenshots/report-generated-new-run.png', animations: 'disabled' });
+  await page.evaluate(() => {
+    const host = window as any;
+    host.__native.readReportFails = true;
+    host.pilotDesktop.refreshReport = async () => ({ status: 'missing', message: '보고서 사본이 없습니다.', runId: host.__backend.runId, inspectionCompleted: false });
+  });
+  await page.getByRole('button', { name: '보고서 열기', exact: true }).click();
+  await page.getByRole('button', { name: '보고서 다시 불러오기', exact: true }).click();
+  await expect(page.locator('.agent-activity-summary h3')).toHaveText('보고서를 불러오지 못했습니다');
+  await expect(page.locator('.message-content').last()).not.toContainText('생성을 완료');
+  await expect(page.locator('.agent-activity-done-label')).toHaveCount(0);
+});
+
+test('an actual failure after partial PDF attachment retains its error display', async ({ page }) => {
+  await backendFixture(page);
+  await send(page, 'https://example.com 메뉴 검사');
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
+  await page.evaluate(() => {
+    const backend = (window as any).__backend;
+    backend.report.inspectionCompleted = false;
+    backend.emit({ type: 'report', report: backend.report });
+    backend.emit({ type: 'inspection', phase: 'error', url: 'https://example.com/' });
+    backend.emit({ type: 'activity', phase: 'finalizing', actionCount: 1, visitedCount: 1, url: 'https://example.com/' });
+    backend.finish({ ok: false, error: '실행 결과 검증에 실패했습니다.' });
+  });
+  await expect(page.locator('.assistant-message.has-error')).toHaveCount(1);
+  await expect(page.locator('.message-content').last()).toContainText('실행 결과 검증에 실패했습니다.');
+  await expect(page.locator('.agent-activity-summary h3')).toHaveText('버그 탐색을 완료하지 못했습니다');
+});
+
+test('verified same-run PDF recovery restores completion after an attachment failure', async ({ page }) => {
+  await backendFixture(page);
+  await send(page, 'https://example.com 메뉴 검사');
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
+  await page.evaluate(() => {
+    const backend = (window as any).__backend;
+    backend.emit({ type: 'inspection', phase: 'error', url: 'https://example.com/' });
+    backend.emit({ type: 'report', report: { status: 'error', message: '보고서 사본 저장 실패', runId: backend.runId, inspectionCompleted: true } });
+    backend.finish({ ok: false, error: '이번 검사 보고서를 첨부하지 못했습니다.' });
+  });
+  await expect(page.locator('.message-content').last()).toContainText('첨부하지 못');
+  await page.getByRole('button', { name: '다시 불러오기', exact: true }).click();
+  await expect(page.locator('.message-content').last()).toHaveText('버그 탐색을 완료했고 보고서를 완성했어요.');
+  await expect(page.locator('.inspection-status')).toContainText('보고서 생성 완료');
+  await expect(page.locator('.tour-plan-state')).toContainText('실행 종료');
+  await expect(page.getByRole('button', { name: '보고서 열기', exact: true })).toBeEnabled();
+  expect(await page.evaluate(() => (window as any).__backend.refreshed)).toEqual(['c2eb104a-6476-4b89-ace1-b2a01bcb9282']);
+});
 
 async function trackEntryMotion(page: Page) {
   await page.addInitScript(() => {
@@ -209,7 +393,8 @@ test('URL prompts create a local plan before native execution and preserve DOM-t
   const assistant = stored[0].messages.find((message: any) => message.source === 'openai');
   expect(assistant.source).toBe('openai');
   expect(assistant.usage.totalTokens).toBe(60);
-  expect(assistant.activity).toMatchObject({ phase: 'complete', visitedCount: 3, actionCount: 10 });
+  expect(assistant.activity).toMatchObject({ phase: 'complete', visitedCount: 3, actionCount: 5 });
+  expect(await page.evaluate(() => (window as any).__native.requests[0])).not.toHaveProperty('maxActions');
   expect(assistant.captures).toBeUndefined();
   expect(await page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
   await expect(page.locator('.capture-card')).toHaveCount(0);
@@ -277,12 +462,240 @@ test('QA team profile opens settings; missing key and native test/save preserve 
   await expect(page.locator('.sidebar-bottom')).not.toContainText('토큰');
   await profile.click();
   await expect(page.getByRole('combobox', { name: '모델 선택' })).toHaveValue('gpt-6.2-sol');
-  await expect(page.getByRole('dialog')).toContainText('이번 달 API 사용량');
+  await expect(page.getByRole('dialog')).toContainText('이번 달 OpenAI API 사용량');
   await expect(page.getByRole('dialog')).toContainText('토큰');
   await expect(page.getByRole('checkbox', { name: /전체 화면|촬영 효과/ })).toHaveCount(0);
   await expect(page.getByRole('dialog')).not.toContainText('캡처 화면은 선택한 OpenAI 모델에 전송');
   await expect(page.getByRole('dialog')).toContainText(/검정|검은/);
   await expect(page.getByRole('dialog')).toContainText('Esc');
+});
+
+test('provider settings isolate drafts, models, keys and usage and route Claude chat', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  const provider = page.getByRole('combobox', { name: 'AI 선택', exact: true });
+  const model = page.getByRole('combobox', { name: '모델 선택', exact: true });
+  await expect(provider).toHaveValue('openai');
+  await page.getByLabel('OpenAI API 키', { exact: true }).fill('sk-unsaved-openai-do-not-send');
+  await model.selectOption('gpt-6.2-sol');
+  await provider.selectOption('anthropic');
+  await expect(model).toHaveValue('claude-haiku-5-5');
+  await expect(model.locator('option[value="gpt-6-luna"]')).toHaveCount(0);
+  await expect(page.getByLabel('Anthropic API 키', { exact: true })).toHaveValue('');
+  await expect(page.getByRole('button', { name: '연결 확인', exact: true })).toBeDisabled();
+  await expect(page.getByRole('link', { name: '키 발급' })).toHaveAttribute('href', 'https://platform.claude.com/settings/keys');
+  await expect(page.getByRole('dialog')).toContainText('실제 검사 백엔드에는 적용되지 않습니다.');
+  const fields = await page.locator('#api-provider, #api-model, #api-key').evaluateAll(nodes => nodes.map(node => node.id));
+  expect(fields).toEqual(['api-provider', 'api-model', 'api-key']);
+  await model.selectOption('claude-sonnet-5-5');
+  await page.getByLabel('Anthropic API 키', { exact: true }).fill('sk-ant-test-display-only');
+  await page.getByRole('button', { name: '연결 확인', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.tested.length)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__native.tested[0])).toEqual({ provider: 'anthropic', model: 'claude-sonnet-5-5', apiKey: 'sk-ant-test-display-only' });
+  await page.getByRole('button', { name: '연결 저장', exact: true }).click();
+  await expect(page.getByLabel('Anthropic API 키', { exact: true })).toHaveValue('');
+  await expect(page.getByLabel('Anthropic API 키', { exact: true })).toHaveAttribute('placeholder', /••••anth/);
+  await page.screenshot({ path: 'screenshots/claude-settings.png', animations: 'disabled' });
+  await provider.selectOption('openai');
+  await expect(model).toHaveValue('gpt-6.2-sol');
+  await expect(page.getByLabel('OpenAI API 키', { exact: true })).toHaveValue('');
+  await expect(page.getByLabel('OpenAI API 키', { exact: true })).toHaveAttribute('placeholder', /••••test/);
+  await expect(page.locator('.usage-grid')).toContainText('200');
+  await provider.selectOption('anthropic');
+  await expect(model).toHaveValue('claude-sonnet-5-5');
+  expect(await page.evaluate(() => Object.values(localStorage).join('') + Object.values(sessionStorage).join(''))).not.toContain('sk-ant-test-display-only');
+  expect(await page.evaluate(() => JSON.stringify((window as any).__native.saved))).not.toContain('sk-unsaved-openai-do-not-send');
+  await page.keyboard.press('Escape');
+  await send(page, '화면 탐색 준비 방법 알려줘');
+  await expect(page.locator('.assistant-message .message-actions')).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__native.requests[0])).toMatchObject({ provider: 'anthropic', model: 'claude-sonnet-5-5' });
+  const storedMessage = await page.evaluate(() => JSON.parse(localStorage.getItem('webpilot.conversations.v1')!)[0].messages.at(-1));
+  expect(storedMessage).toMatchObject({ provider: 'anthropic', source: 'anthropic', model: 'claude-sonnet-5-5' });
+  await page.reload();
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await expect(provider).toHaveValue('anthropic');
+  await expect(model).toHaveValue('claude-sonnet-5-5');
+  await expect(page.locator('.usage-grid')).toContainText('40');
+  await provider.selectOption('openai');
+  await expect(model).toHaveValue('gpt-6-luna');
+  await expect(page.locator('.usage-grid')).toContainText('200');
+});
+
+test('visual and backend settings use separate roles, credentials and model requests', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  const visualTab = page.getByRole('tab', { name: '화면 표현 AI', exact: true });
+  const backendTab = page.getByRole('tab', { name: '실제 검사 백엔드', exact: true });
+  await expect(visualTab).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('combobox', { name: 'AI 선택', exact: true }).selectOption('anthropic');
+  await page.getByLabel('Anthropic API 키', { exact: true }).fill('sk-unsaved-visual-only');
+  await backendTab.click();
+  await expect(page.getByLabel('Anthropic API 키', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.backend-key-status')).toContainText('키 설정 필요');
+  await expect(page.getByRole('combobox', { name: '계획·탐색 모델', exact: true })).toHaveValue('claude-opus-5-5');
+  await expect(page.getByRole('combobox', { name: '판정·보고서 모델', exact: true })).toHaveValue('claude-sonnet-5-5');
+  await page.getByRole('combobox', { name: '백엔드 AI 선택', exact: true }).selectOption('openai');
+  const backendKey = page.getByLabel('백엔드 전용 OpenAI API 키', { exact: true });
+  await expect(backendKey).toHaveValue('');
+  await expect(page.getByRole('button', { name: '백엔드 연결 확인', exact: true })).toBeDisabled();
+  await page.getByRole('combobox', { name: '계획·탐색 모델', exact: true }).selectOption('gpt-6.2-astra');
+  await page.getByRole('combobox', { name: '판정·보고서 모델', exact: true }).selectOption('gpt-6.2-sol');
+  await backendKey.fill('sk-backend-openai-only');
+  await page.getByRole('button', { name: '백엔드 연결 확인', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.backendTested.length)).toBe(1);
+  const expected = { provider: 'openai', models: { plan: 'gpt-6.2-astra', triage: 'gpt-6.2-sol' }, apiKey: 'sk-backend-openai-only' };
+  expect(await page.evaluate(() => (window as any).__native.backendTested[0])).toEqual(expected);
+  await page.getByRole('button', { name: '백엔드 설정 저장', exact: true }).click();
+  await expect(backendKey).toHaveValue('');
+  await expect(backendKey).toHaveAttribute('placeholder', /••••back/);
+  await expect(page.locator('.backend-key-status')).toContainText('.env · OPENAI_API_KEY');
+  await expect(page.getByRole('tabpanel')).toContainText('화면 표현 AI 설정은 바뀌지 않습니다.');
+  expect(await page.evaluate(() => (window as any).__native.backendSaved[0])).toEqual(expected);
+  expect(await page.evaluate(() => (window as any).__native.saved.length)).toBe(0);
+  expect(await page.evaluate(() => (window as any).__native.tested.length)).toBe(0);
+  expect(await page.evaluate(() => Object.values(localStorage).join('') + Object.values(sessionStorage).join(''))).not.toContain('sk-backend-openai-only');
+  await page.screenshot({ path: 'screenshots/backend-settings.png', animations: 'disabled' });
+  await visualTab.click();
+  await expect(page.getByRole('combobox', { name: 'AI 선택', exact: true })).toHaveValue('anthropic');
+  await expect(page.getByLabel('Anthropic API 키', { exact: true })).toHaveValue('');
+  await page.getByRole('combobox', { name: 'AI 선택', exact: true }).selectOption('openai');
+  await expect(page.getByRole('combobox', { name: '모델 선택', exact: true })).toHaveValue('gpt-6-luna');
+  await expect(page.getByLabel('OpenAI API 키', { exact: true })).toHaveAttribute('placeholder', /••••test/);
+  await page.screenshot({ path: 'screenshots/visual-settings-role.png', animations: 'disabled' });
+  await backendTab.click();
+  await expect(page.getByRole('combobox', { name: '백엔드 AI 선택', exact: true })).toHaveValue('openai');
+  await expect(page.getByRole('combobox', { name: '계획·탐색 모델', exact: true })).toHaveValue('gpt-6.2-astra');
+  await expect(page.getByRole('combobox', { name: '판정·보고서 모델', exact: true })).toHaveValue('gpt-6.2-sol');
+});
+
+test('backend provider switching discards draft keys and preserves independent saved model pairs', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '실제 검사 백엔드', exact: true }).click();
+  const provider = page.getByRole('combobox', { name: '백엔드 AI 선택', exact: true });
+  await page.getByRole('combobox', { name: '계획·탐색 모델', exact: true }).selectOption('claude-haiku-5-5');
+  await page.getByLabel('백엔드 전용 Anthropic API 키', { exact: true }).fill('sk-unsaved-backend-anthropic');
+  await provider.selectOption('openai');
+  await expect(page.getByLabel('백엔드 전용 OpenAI API 키', { exact: true })).toHaveValue('');
+  await expect(page.getByRole('button', { name: '백엔드 연결 확인', exact: true })).toBeDisabled();
+  await page.getByRole('combobox', { name: '계획·탐색 모델', exact: true }).selectOption('gpt-6.1-terra');
+  await page.getByLabel('백엔드 전용 OpenAI API 키', { exact: true }).fill('sk-backend-openai-saved');
+  await page.getByRole('button', { name: '백엔드 설정 저장', exact: true }).click();
+  await expect(page.getByLabel('백엔드 전용 OpenAI API 키', { exact: true })).toHaveValue('');
+  await provider.selectOption('anthropic');
+  await expect(page.getByRole('combobox', { name: '계획·탐색 모델', exact: true })).toHaveValue('claude-haiku-5-5');
+  await expect(page.getByLabel('백엔드 전용 Anthropic API 키', { exact: true })).toHaveValue('');
+  await page.getByLabel('백엔드 전용 Anthropic API 키', { exact: true }).fill('sk-ant-backend-saved');
+  await page.getByRole('button', { name: '백엔드 설정 저장', exact: true }).click();
+  await expect(page.getByLabel('백엔드 전용 Anthropic API 키', { exact: true })).toHaveValue('');
+  await provider.selectOption('openai');
+  await expect(page.getByRole('combobox', { name: '계획·탐색 모델', exact: true })).toHaveValue('gpt-6.1-terra');
+  await expect(page.getByLabel('백엔드 전용 OpenAI API 키', { exact: true })).toHaveAttribute('placeholder', /••••back/);
+  expect(await page.evaluate(() => JSON.stringify((window as any).__native.backendSaved))).not.toContain('sk-unsaved-backend-anthropic');
+  expect(await page.evaluate(() => (window as any).__native.saved.length)).toBe(0);
+});
+
+test('backend env-file key removal preserves environment credentials and running work disables editing', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await page.evaluate(() => {
+    const profile = (window as any).__backendSettings.profiles.anthropic;
+    profile.keyConfigured = true; profile.source = 'environment';
+  });
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '실제 검사 백엔드', exact: true }).click();
+  await expect(page.locator('.backend-key-status')).toContainText('환경변수 · ANTHROPIC_API_KEY');
+  await expect(page.getByRole('button', { name: '백엔드 키 삭제', exact: true })).toHaveCount(0);
+  await page.getByLabel('백엔드 전용 Anthropic API 키', { exact: true }).fill('sk-ant-backend-file-only');
+  await page.getByRole('button', { name: '백엔드 설정 저장', exact: true }).click();
+  await expect(page.getByRole('tabpanel')).toContainText('환경변수의 키가 우선 사용됩니다.');
+  await page.getByRole('button', { name: '백엔드 키 삭제', exact: true }).click();
+  await expect(page.getByRole('tabpanel')).toContainText('환경변수의 키는 유지됩니다.');
+  await expect(page.locator('.backend-key-status')).toContainText('키 설정됨');
+  await expect(page.getByRole('button', { name: '백엔드 연결 확인', exact: true })).toBeEnabled();
+  expect(await page.evaluate(() => (window as any).__native.backendSaved.at(-1))).toEqual({ provider: 'anthropic', forgetKey: true });
+  await page.keyboard.press('Escape');
+  await send(page, '중단 대기 응답');
+  await expect(page.getByRole('button', { name: '응답 중지', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '실제 검사 백엔드', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: '백엔드 AI 선택', exact: true })).toBeDisabled();
+  await expect(page.getByRole('combobox', { name: '계획·탐색 모델', exact: true })).toBeDisabled();
+  await expect(page.getByLabel('백엔드 전용 Anthropic API 키', { exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '백엔드 연결 확인', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '백엔드 설정 저장', exact: true })).toBeDisabled();
+});
+
+test('unreadable backend settings remain unknown and can reload without changing visual settings', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await page.evaluate(() => { (window as any).__native.backendReadFails = true; });
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '실제 검사 백엔드', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('백엔드 설정 상태를 확인하지 못했습니다.');
+  await expect(page.locator('.backend-key-status')).toHaveCount(0);
+  await expect(page.locator('#backend-api-key')).toHaveCount(0);
+  await page.evaluate(() => { (window as any).__native.backendReadFails = false; });
+  await page.getByRole('button', { name: '상태 다시 확인', exact: true }).click();
+  await expect(page.locator('.backend-key-status')).toContainText('키 설정 필요');
+  await page.getByRole('tab', { name: '화면 표현 AI', exact: true }).click();
+  await expect(page.getByLabel('OpenAI API 키', { exact: true })).toHaveAttribute('placeholder', /••••test/);
+  expect(await page.evaluate(() => (window as any).__native.saved.length)).toBe(0);
+  expect(await page.evaluate(() => (window as any).__native.backendSaved.length)).toBe(0);
+});
+
+test('a saved Claude plan keeps its provider after active settings change and history reload', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('combobox', { name: 'AI 선택', exact: true }).selectOption('anthropic');
+  await page.getByRole('combobox', { name: '모델 선택', exact: true }).selectOption('claude-opus-5-5');
+  await page.getByLabel('Anthropic API 키', { exact: true }).fill('sk-ant-plan-fixture');
+  await page.getByRole('button', { name: '연결 저장', exact: true }).click();
+  await expect(page.locator('.settings-notice')).toContainText('저장했습니다');
+  await page.keyboard.press('Escape');
+  await send(page, 'https://example.com Claude 계획');
+  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toContainText('Claude Opus 5.5');
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('combobox', { name: 'AI 선택', exact: true }).selectOption('openai');
+  await page.getByRole('button', { name: '연결 저장', exact: true }).click();
+  await expect(page.locator('.settings-notice')).toContainText('저장했습니다');
+  await page.keyboard.press('Escape');
+  await page.reload();
+  await page.locator('.history-select').first().click();
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__native.requests[0])).toMatchObject({ provider: 'anthropic', model: 'claude-opus-5-5', targetUrl: 'https://example.com/' });
+  await expect(page.locator('.tour-plan-complete')).toBeVisible();
+  const message = await page.evaluate(() => JSON.parse(localStorage.getItem('webpilot.conversations.v1')!)[0].messages.at(-1));
+  expect(message).toMatchObject({ provider: 'anthropic', source: 'anthropic', model: 'claude-opus-5-5' });
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'AI 선택', exact: true })).toHaveValue('openai');
+  await expect(page.locator('.usage-grid')).toContainText('200');
+});
+
+test('a plan requiring a Claude key opens that provider instead of borrowing the OpenAI key', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await send(page, 'https://example.com 키 분리 확인');
+  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
+  await page.getByLabel('화면 표현 AI', { exact: true }).selectOption('anthropic');
+  await expect(page.getByLabel('화면 표현 모델', { exact: true })).toHaveValue('claude-haiku-5-5');
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'AI 선택', exact: true })).toHaveValue('anthropic');
+  await expect(page.getByRole('button', { name: '연결 확인', exact: true })).toBeDisabled();
+  expect(await page.evaluate(() => (window as any).__native.requests)).toEqual([]);
+  await page.getByLabel('Anthropic API 키', { exact: true }).fill('sk-ant-only-for-plan');
+  await page.getByRole('button', { name: '연결 저장', exact: true }).click();
+  await expect(page.locator('.settings-notice')).toContainText('저장했습니다');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__native.requests[0])).toMatchObject({ provider: 'anthropic', model: 'claude-haiku-5-5' });
 });
 
 test('URL dialog, multiline input and Korean IME do not send prematurely', async ({ page }) => {
@@ -320,15 +733,15 @@ test('simultaneous chat streams stay isolated when switching conversations', asy
   expect(await page.evaluate(() => new Set((window as any).__native.requests.map((request: any) => request.requestId)).size)).toBe(2);
 });
 
-test('pending tour settings update URL, model and action limit; login controls remain optional and masked', async ({ page }) => {
+test('pending tour settings update URL and model with backend following; login controls remain optional and masked', async ({ page }) => {
   await nativeFixture(page);
   await page.goto('/');
   await send(page, 'https://example.com 메뉴를 둘러봐 줘');
   await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
   await page.getByLabel('대상 URL', { exact: true }).fill('https://example.org/updated');
-  await page.getByLabel('버그 탐색 요청', { exact: true }).fill('새 사이트의 메뉴를 확인해 줘');
-  await page.getByLabel('탐색 모델', { exact: true }).selectOption('gpt-6.2-sol');
-  await page.getByLabel('탐색 횟수', { exact: true }).fill('23');
+  await page.getByLabel('실제 백엔드 검사 요구사항', { exact: true }).fill('새 사이트의 메뉴를 확인해 줘');
+  await page.getByLabel('화면 표현 모델', { exact: true }).selectOption('gpt-6.2-sol');
+  await expect(page.getByLabel('탐색 횟수', { exact: true })).toHaveCount(0);
   const login = page.getByRole('checkbox', { name: '로그인 계정 사용' });
   await login.check();
   await expect(page.getByLabel('사이트 비밀번호', { exact: true })).toHaveAttribute('type', 'password');
@@ -341,15 +754,80 @@ test('pending tour settings update URL, model and action limit; login controls r
   await expect(page.getByRole('dialog')).toHaveCount(0);
   const plan = page.getByRole('region', { name: '버그 탐색 계획' });
   await expect(plan).toContainText('https://example.org/updated');
-  await expect(plan).toContainText('23회');
+  await expect(plan).toContainText('백엔드 진행 따라가기');
   await expect(plan).toContainText('계정 미지정 · 로그인 화면 확인 가능');
   expect(await page.evaluate(() => (window as any).__native.requests)).toEqual([]);
   await page.getByRole('button', { name: '시작하기', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
-  expect(await page.evaluate(() => (window as any).__native.requests[0])).toMatchObject({ targetUrl: 'https://example.org/updated', model: 'gpt-6.2-sol', maxActions: 23 });
+  expect(await page.evaluate(() => (window as any).__native.requests[0])).toMatchObject({ targetUrl: 'https://example.org/updated', model: 'gpt-6.2-sol' });
   expect(await page.evaluate(() => (window as any).__native.requests[0].messages.at(-1).content)).toContain('새 사이트의 메뉴를 확인해 줘');
   expect(await page.evaluate(() => (window as any).__native.requests[0].credentials)).toBeUndefined();
   await expect(page.locator('.assistant-message .message-actions')).toBeVisible();
+});
+
+test('per-run backend parameters reach native execution exactly and survive history and retry independently of visual settings', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await send(page, 'https://example.com 실제 검사 설정');
+  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
+  await page.getByLabel('실제 백엔드 검사 요구사항', { exact: true }).fill('검색 결과와 상세 화면을 확인해 주세요.');
+  await page.getByLabel('백엔드 AI', { exact: true }).selectOption('openai');
+  await page.getByLabel('백엔드 계획·탐색 모델', { exact: true }).selectOption('gpt-6.2-astra');
+  await page.getByLabel('백엔드 판정·보고서 모델', { exact: true }).selectOption('gpt-6.2-sol');
+  await page.getByLabel('검사 예산 (USD)', { exact: true }).fill('2.5');
+  await page.getByLabel('탐색 시간 (분)', { exact: true }).fill('9');
+  await page.getByLabel('최대 방문 페이지', { exact: true }).fill('7');
+  await page.getByText('백엔드 고급 검사 설정', { exact: true }).click();
+  for (const [label, number] of [['최대 페이지 종류', '4'], ['페이지 종류별 탐색 턴', '12'], ['대화별 최대 턴', '31'], ['종류별 검사 페이지', '2'], ['동시 탐색·판정 수', '2'], ['동시 검사 실행 수', '3']]) await page.getByLabel(label, { exact: true }).fill(number);
+  await page.getByLabel('백엔드 추론 수준', { exact: true }).selectOption('high');
+  await page.getByLabel('백엔드 탐색 묶음', { exact: true }).selectOption('cluster');
+  await expect(page.getByLabel('탐색 횟수', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  const expected = { provider: 'openai', models: { plan: 'gpt-6.2-astra', triage: 'gpt-6.2-sol' }, budgetUsd: 2.5, exploreMinutes: 9, maxPages: 7, maxTemplates: 4, turnsPerTemplate: 12, maxTurns: 31, pagesPerTemplate: 2, concurrency: 2, workers: 3, planEffort: 'high', sessions: 'cluster' };
+  const plan = page.getByRole('region', { name: '버그 탐색 계획' });
+  await expect(plan).toContainText('예산 $2.5 · 탐색 9분 · 최대 7페이지');
+  await page.screenshot({ path: 'screenshots/backend-test-plan.png', animations: 'disabled' });
+  await page.reload();
+  await page.locator('.history-select').filter({ hasText: 'https://example.com' }).click();
+  await page.evaluate(() => { (window as any).__native.failNext = true; });
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect(page.getByRole('button', { name: '다시 시도', exact: true })).toBeVisible();
+  const first = await page.evaluate(() => (window as any).__native.requests[0]);
+  expect(first).toMatchObject({ provider: 'openai', model: 'gpt-6-luna', backendTask: '검색 결과와 상세 화면을 확인해 주세요.', backendOptions: expected });
+  await page.getByRole('button', { name: '다시 시도', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(2);
+  expect(await page.evaluate(() => (window as any).__native.requests[1].backendOptions)).toEqual(expected);
+  expect(await page.evaluate(() => (window as any).__native.backendSaved)).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__native.saved)).toEqual([]);
+});
+
+test('invalid backend settings do not apply and a delayed settings read cannot create duplicate plans', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await page.evaluate(() => {
+    const host = window as any;
+    const read = host.pilotDesktop.getBackendSettings;
+    host.__reads = 0;
+    host.pilotDesktop.getBackendSettings = () => new Promise(resolve => { host.__reads++; host.__releaseBackend = async () => resolve(await read()); });
+  });
+  const input = page.getByRole('textbox', { name: '메시지', exact: true });
+  await input.fill('https://example.com 지연된 설정 확인');
+  await input.press('Enter');
+  await input.press('Enter');
+  expect(await page.evaluate(() => (window as any).__reads)).toBe(1);
+  await page.evaluate(() => (window as any).__releaseBackend());
+  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toHaveCount(1);
+  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
+  await page.getByLabel('검사 예산 (USD)', { exact: true }).fill('0');
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  expect(await page.getByLabel('검사 예산 (USD)', { exact: true }).evaluate((node: HTMLInputElement) => node.validity.valid)).toBe(false);
+  await page.getByLabel('검사 예산 (USD)', { exact: true }).fill('4');
+  await page.getByLabel('백엔드 계획·탐색 모델', { exact: true }).selectOption('__custom');
+  await page.getByLabel('백엔드 계획·탐색 모델 ID', { exact: true }).fill('../private');
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('백엔드 AI와 계획·판정 모델 ID');
+  expect(await page.evaluate(() => (window as any).__native.requests)).toEqual([]);
 });
 
 test('Markdown URL and multiple priority instructions reach the native agent with draft text intact', async ({ page }) => {
@@ -359,14 +837,14 @@ test('Markdown URL and multiple priority instructions reach the native agent wit
   await send(page, prompt);
   const plan = page.getByRole('region', { name: '버그 탐색 계획' });
   await expect(plan.locator('.tour-plan-url')).toHaveText('http://127.0.0.1:5173/');
-  await expect(plan).toContainText('검색·제목·본문·글 등록');
-  await expect(plan).toContainText('10회');
-  await expect(plan).toContainText('지시한 대상 우선, 횟수 도달 시 완료');
+  await expect(plan).toContainText('읽기·검색·화면 조작');
+  await expect(plan).toContainText('백엔드 진행 따라가기');
+  await expect(plan).toContainText('검사 종료까지 현재 위치·단계 표시');
   await page.getByRole('button', { name: '시작하기', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
   const request = await page.evaluate(() => (window as any).__native.requests[0]);
   expect(request.targetUrl).toBe('http://127.0.0.1:5173/');
-  expect(request.maxActions).toBe(10);
+  expect(request).not.toHaveProperty('maxActions');
   expect(request.messages.at(-1).content).toContain(prompt);
   expect(request.credentials).toBeUndefined();
 });
@@ -376,7 +854,7 @@ test('prompt credentials stay transient and are sent only in the dedicated nativ
   await page.goto('/');
   const credentials = { username: 'account-744', password: 'secret-388' };
   await send(page, `https://example.com 로그인해서 메뉴를 둘러봐 줘\n아이디: ${credentials.username}\n비밀번호: ${credentials.password}`);
-  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toContainText('지정한 계정으로 로그인');
+  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toContainText('실제 검사와 화면 표현에 적용');
   await expect(page.locator('.conversation-content')).not.toContainText(credentials.password);
   await expect(page.locator('.conversation-content')).not.toContainText(credentials.username);
   const before = await page.evaluate(() => localStorage.getItem('webpilot.conversations.v1')!);
@@ -394,10 +872,48 @@ test('prompt credentials stay transient and are sent only in the dedicated nativ
   expect(await page.evaluate(() => localStorage.getItem('webpilot.conversations.v1')!)).not.toContain(credentials.password);
 });
 
+test('account-bearing URLs are rejected before plan storage while ordinary admin routes remain usable', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await send(page, 'https://example.com/login?token=%73ecret-912 로그인해 줘\nusername: admin\npassword: secret-912');
+  await expect(page.getByRole('alert')).toContainText('계정 정보를 포함할 수 없습니다');
+  await expect(page.locator('.history-item')).toHaveCount(0);
+  expect(await page.evaluate(() => Object.values(localStorage).join(''))).not.toContain('ecret-912');
+  await expect(page.getByRole('textbox', { name: '메시지', exact: true })).toHaveValue('');
+  await send(page, 'https://example.com/admin/login 로그인해 줘\nusername: admin\npassword: secret-912');
+  await expect(page.locator('.tour-plan-url')).toHaveText('https://example.com/admin/login');
+  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
+  for (const url of ['/login?account=admin', '/login#account=admin', '/%73ecret-912/login']) {
+    await page.getByLabel('로그인 URL', { exact: true }).fill(url);
+    await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+    await expect(page.getByRole('alert')).toContainText('계정 정보를 포함할 수 없습니다');
+  }
+  await page.getByLabel('로그인 URL', { exact: true }).fill('/admin/login');
+  await page.getByLabel('대상 URL', { exact: true }).fill('https://example.com/login?account=admin');
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('계정 정보를 포함할 수 없습니다');
+  expect(await page.evaluate(() => Object.values(localStorage).join(''))).not.toContain('account=admin');
+  await page.getByLabel('대상 URL', { exact: true }).fill('https://example.com/admin/login');
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
+  const request = await page.evaluate(() => (window as any).__native.requests[0]);
+  expect(request.targetUrl).toBe('https://example.com/admin/login');
+  expect(request.backendLoginUrl).toBe('https://example.com/admin/login');
+  expect(request.credentials).toEqual({ username: 'admin', password: 'secret-912' });
+  expect(await page.evaluate(() => Object.values(localStorage).join(''))).not.toContain('secret-912');
+});
+
 test('reloading a pending login plan requires account re-entry before native execution', async ({ page }) => {
   await nativeFixture(page);
   await page.goto('/');
   await send(page, 'https://example.com 로그인해 줘\nusername: old-account-745\npassword: old-secret-389');
+  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
+  await page.getByLabel('로그인 URL', { exact: true }).fill('https://external.test/login');
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('동일한 출처');
+  await page.getByLabel('로그인 URL', { exact: true }).fill('/login');
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
   await page.reload();
   await page.locator('.history-select').filter({ hasText: 'https://example.com' }).click();
   await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toContainText('계정 다시 입력 필요');
@@ -408,6 +924,7 @@ test('reloading a pending login plan requires account re-entry before native exe
   await expect(page.getByLabel('사이트 아이디', { exact: true })).toHaveValue('');
   await expect(page.getByLabel('사이트 비밀번호', { exact: true })).toHaveValue('');
   await expect(page.getByLabel('사이트 비밀번호', { exact: true })).toHaveAttribute('type', 'password');
+  await expect(page.getByLabel('로그인 URL', { exact: true })).toHaveValue('https://example.com/login');
   expect(await page.evaluate(() => (window as any).__native.requests)).toEqual([]);
   await page.getByLabel('사이트 아이디', { exact: true }).fill('new-account-746');
   await page.getByLabel('사이트 비밀번호', { exact: true }).fill('new-secret-390');
@@ -415,6 +932,8 @@ test('reloading a pending login plan requires account re-entry before native exe
   await page.getByRole('button', { name: '시작하기', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
   expect(await page.evaluate(() => (window as any).__native.requests[0].credentials)).toEqual({ username: 'new-account-746', password: 'new-secret-390' });
+  expect(await page.evaluate(() => (window as any).__native.requests[0].backendLoginUrl)).toBe('https://example.com/login');
+  expect(await page.evaluate(() => Object.values(localStorage).join(''))).not.toContain('new-secret-390');
   await expect(page.locator('.assistant-message .message-actions')).toBeVisible();
 });
 
@@ -450,7 +969,9 @@ test('changing a login plan origin clears the original account and requires new 
   await send(page, 'https://example.com 로그인해 줘\nid: origin-a-account\npassword: origin-a-secret');
   await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
   await expect(page.getByLabel('사이트 아이디', { exact: true })).toHaveValue('origin-a-account');
+  await page.getByLabel('로그인 URL', { exact: true }).fill('/login');
   await page.getByLabel('대상 URL', { exact: true }).fill('https://example.org/new-origin');
+  await expect(page.getByLabel('로그인 URL', { exact: true })).toHaveValue('');
   await expect(page.getByLabel('사이트 아이디', { exact: true })).toHaveValue('');
   await expect(page.getByLabel('사이트 비밀번호', { exact: true })).toHaveValue('');
   await expect(page.getByRole('alert')).toContainText('대상 사이트가 변경');
@@ -476,7 +997,7 @@ test('custom model whitespace is trimmed and the pending plan survives reload', 
   await page.goto('/');
   await send(page, 'https://example.com 메뉴를 둘러봐 줘');
   await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
-  await page.getByLabel('탐색 모델', { exact: true }).selectOption('custom');
+  await page.getByLabel('화면 표현 모델', { exact: true }).selectOption('custom');
   await page.getByLabel('모델 ID', { exact: true }).fill('  gpt-6-luna  ');
   await page.getByRole('button', { name: '설정 적용', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -493,30 +1014,35 @@ test('custom model whitespace is trimmed and the pending plan survives reload', 
   await expect(page.locator('.assistant-message .message-actions')).toBeVisible();
 });
 
-test('action limit accepts positive integers above five and rejects invalid values', async ({ page }) => {
+test('legacy visual quota is removed on reload and retry follows the backend without a count setting', async ({ page }) => {
   await nativeFixture(page);
   await page.goto('/');
   await send(page, 'https://example.com 버그를 탐색해 줘');
-  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
-  const limit = page.getByLabel('탐색 횟수', { exact: true });
-  await expect(limit).toHaveAttribute('type', 'number');
-  for (const value of ['', '0', '-1', '1.5']) {
-    await limit.fill(value);
-    await page.getByRole('button', { name: '설정 적용', exact: true }).click();
-    await expect(page.getByRole('dialog')).toBeVisible();
-    expect(await limit.evaluate((element: HTMLInputElement) => element.validity.valid)).toBe(false);
-  }
-  await limit.fill('9007199254740992');
-  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('1 이상의 정수');
-  await limit.fill('125');
-  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
-  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toContainText('125회');
+  await page.evaluate(() => {
+    const history = JSON.parse(localStorage.getItem('webpilot.conversations.v1')!);
+    history[0].messages.find((message: any) => message.plan).plan.maxActions = 1;
+    localStorage.setItem('webpilot.conversations.v1', JSON.stringify(history));
+  });
   await page.reload();
   await page.locator('.history-select').filter({ hasText: 'https://example.com' }).click();
-  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toContainText('125회');
+  const plan = page.getByRole('region', { name: '버그 탐색 계획' });
+  await expect(plan).toContainText('백엔드 진행 따라가기');
+  await expect(plan).not.toContainText('화면 표현 횟수');
+  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
+  await expect(page.getByLabel('탐색 횟수', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('횟수를 정하지 않고 백엔드의 현재 탐색 위치와 단계를 따라갑니다.', { exact: false })).toBeVisible();
+  await expect(page.getByLabel('최대 방문 페이지', { exact: true })).toHaveValue('30');
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  await page.screenshot({ path: 'screenshots/backend-follow-plan.png', animations: 'disabled' });
+  expect(await page.evaluate(() => localStorage.getItem('webpilot.conversations.v1'))).not.toContain('maxActions');
+  await page.evaluate(() => { (window as any).__native.failNext = true; });
   await page.getByRole('button', { name: '시작하기', exact: true }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).__native.requests[0]?.maxActions)).toBe(125);
+  await expect(page.getByRole('button', { name: '다시 시도', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '다시 시도', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(2);
+  const requests = await page.evaluate(() => (window as any).__native.requests);
+  expect(requests.every((request: any) => !Object.hasOwn(request, 'maxActions'))).toBe(true);
+  expect(requests.every((request: any) => request.backendOptions.maxPages === 30)).toBe(true);
 });
 
 test('completed report opens an in-app PDF viewer with rendering, pages and zoom without another request', async ({ page }) => {
@@ -702,11 +1228,12 @@ test('failed work can restart with the same settings and attach a report only af
   await send(page, 'https://example.com 버그 탐색');
   await page.getByRole('button', { name: '시작하기', exact: true }).click();
   await expect(page.locator('.tour-plan-error')).toBeVisible();
+  await expect(page.locator('.message-content').last()).toContainText('응답을 받지 못했습니다. 일시적인 연결 오류입니다. 다시 시도해 주세요.');
   await expect(page.getByRole('region', { name: '버그 탐색 보고서' })).toHaveCount(0);
   await page.getByRole('button', { name: '다시 시도', exact: true }).click();
   await expect(page.getByRole('button', { name: '보고서 열기', exact: true })).toBeEnabled();
   expect(await page.evaluate(() => (window as any).__native.requests.length)).toBe(2);
-  expect(await page.evaluate(() => (window as any).__native.requests.map((request: any) => [request.targetUrl, request.model, request.maxActions]))).toEqual(Array(2).fill(['https://example.com/', 'gpt-6-luna', 10]));
+  expect(await page.evaluate(() => (window as any).__native.requests.map((request: any) => [request.targetUrl, request.model, Object.hasOwn(request, 'maxActions')]))).toEqual(Array(2).fill(['https://example.com/', 'gpt-6-luna', false]));
   await expect(page.locator('.tour-plan-complete')).toBeVisible();
 });
 

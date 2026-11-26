@@ -1,7 +1,7 @@
 {
   "name": "webpilot-desktop",
   "private": true,
-  "version": "0.4.5",
+  "version": "1.0.1",
   "webpilotWorkspace": "webpilot-report-root-v1",
   "description": "WebPilot — 웹 테스트 에이전트를 위한 데스크톱 워크스페이스",
   "type": "module",
@@ -13,7 +13,10 @@
     "start": "node scripts/start.cjs",
     "test": "tsx --test tests/*.test.ts && node --test scripts/*.test.cjs",
     "test:ui": "playwright test",
-    "package": "npm run build && electron-builder --win dir"
+    "backend:setup": "node scripts/setup-backend.cjs",
+    "setup:backend": "node scripts/setup-backend.cjs",
+    "backend:check": "node scripts/setup-backend.cjs --check",
+    "package": "npm run backend:setup && npm run build && electron-builder --win dir"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -38,13 +41,60 @@
     "appId": "studio.webpilot.desktop",
     "productName": "WebPilot",
     "directories": {
-      "output": "release/0.4.5"
+      "output": "release/1.0.1"
     },
     "files": [
       "dist/**/*",
       "electron/**/*",
       "public/app.ico",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "webtestpilot-backend",
+        "to": "webtestpilot-backend",
+        "filter": [
+          "package.json",
+          "package-lock.json",
+          "qa/package.json",
+          "qa/package-lock.json",
+          "qa/src/**/*",
+          "qa/prompts/**/*",
+          "qa/node_modules/**/*",
+          ".browsers/**/*",
+          "!**/.env*",
+          "!**/.npmrc",
+          "!**/ai-settings.json",
+          "!**/auth_state.json",
+          "!**/storage_state.json",
+          "!**/storageState.json",
+          "!**/backend-runs/**/*",
+          "!**/.browser-profile/**/*",
+          "!.browsers/.links/**/*"
+        ]
+      },
+      {
+        "from": "webtestpilot-backend/node_modules",
+        "to": "webtestpilot-backend/node_modules",
+        "filter": [
+          "**/*",
+          "!**/.env*",
+          "!**/.npmrc",
+          "!**/ai-settings.json",
+          "!**/auth_state.json",
+          "!**/storage_state.json",
+          "!**/storageState.json",
+          "!**/backend-runs/**/*",
+          "!**/.browser-profile/**/*"
+        ]
+      },
+      {
+        "from": "artifacts/backend-runtime",
+        "to": "backend-runtime",
+        "filter": [
+          "node.exe"
+        ]
+      }
     ],
     "win": {
       "target": "dir",

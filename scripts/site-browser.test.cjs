@@ -1,6 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { validateTargetUrl, validateAction, validateDomAction, matchesLoginRequest, matchesContentSubmission, validateTaskPermissions, isForbiddenContentContext, requestPolicy, VIEWPORT, waitForPageReady, typingDelay, readWithNavigationRecovery, SitePolicyError, SiteInteractionError, sanitizeInteractionError, isStandaloneButton, isSensitiveControl, normalizeInputText, inputChunks } = require('../electron/site-browser.cjs');
+const { validateTargetUrl, validateBackendFollowUrl, validateAction, validateDomAction, matchesLoginRequest, matchesLoginPreparationRequest, matchesContentSubmission, validateTaskPermissions, isForbiddenContentContext, requestPolicy, VIEWPORT, waitForPageReady, typingDelay, readWithNavigationRecovery, SitePolicyError, SiteInteractionError, sanitizeInteractionError, isStandaloneButton, isSensitiveControl, normalizeInputText, inputChunks } = require('../electron/site-browser.cjs');
+
+test('native backend page synchronization keeps the original navigation policy', () => {
+  const start = 'http://localhost:8000/catalog';
+  assert.equal(validateBackendFollowUrl('http://localhost:8000/details?id=2', start).href, 'http://localhost:8000/details?id=2');
+  for (const destination of ['https://localhost:8000/', 'http://localhost:8001/', 'http://user:pass@localhost:8000/', 'http://localhost:8000/logout', 'javascript:alert(1)', 'file:///private']) {
+    assert.throws(() => validateBackendFollowUrl(destination, start), SitePolicyError);
+  }
+});
 
 test('standalone default-submit buttons are safe only with no form or submission semantics', () => {
   const standalone = { type: 'submit', disabled: false, hasFormOwner: false, inForm: false, hasFormAttribute: false, hasSubmitOverrides: false };
@@ -145,6 +153,22 @@ test('SPA login permits one same-origin auth endpoint and exact flat credential 
   ]) assert.equal(matchesLoginRequest({ ...request, ...override }, permit, credentials, 1000), false);
   assert.equal(matchesLoginRequest(request, { ...permit, used: true }, credentials, 1000), false);
   assert.equal(matchesLoginRequest(request, permit, credentials, 2001), false);
+});
+
+test('SPA CSRF preparation is read-only and requires an actual armed form submission', () => {
+  const permit = { mode: 'spa', allowedOrigin: 'https://example.com', used: false, expires: 2000 };
+  const request = { url: 'https://example.com/api/auth/csrf', method: 'GET', mainFrame: true, navigation: false };
+  assert.equal(matchesLoginPreparationRequest(request, permit, true, 1000), true);
+  assert.equal(matchesLoginPreparationRequest(request, permit, false, 1000), false);
+  assert.equal(matchesLoginPreparationRequest(request, undefined, true, 1000), false);
+  for (const override of [{ used: true }, { expires: 500 }, { mode: 'html' }]) {
+    assert.equal(matchesLoginPreparationRequest(request, { ...permit, ...override }, true, 1000), false);
+  }
+  for (const override of [{ url: 'https://outside.example/api/auth/csrf' }, { url: 'https://example.com/api/auth/csrf?value=partial' },
+    { url: 'https://example.com/api/auth/csrf#partial' }, { url: 'https://example.com/api/auth/accounts' },
+    { method: 'POST' }, { navigation: true }, { mainFrame: false }]) {
+    assert.equal(matchesLoginPreparationRequest({ ...request, ...override }, permit, true, 1000), false);
+  }
 });
 
 test('an already stable page proceeds immediately without a fixed post-action delay', async () => {

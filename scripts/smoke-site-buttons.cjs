@@ -61,9 +61,12 @@ async function main() {
     view = await session.observe(); assert.equal(view.loginFormVisible, false);
     await session.act({ action: 'click', element_id: find(view, '알림마당') });
     view = await session.observe(); assert.match(view.text, /알림마당 내용 확인/);
+    // Real intermediate pointer movement can hover this control while crossing
+    // the column. Verify its ownership-change guard before travelling past it.
+    await assert.rejects(session.act({ action: 'click', element_id: find(view, 'Ownership changing') }), SitePolicyError);
+    view = await session.observe();
     await session.act({ action: 'click', element_id: find(view, '독립 버튼') });
     view = await session.observe(); assert.match(view.text, /Standalone explicit submit clicked/);
-    await assert.rejects(session.act({ action: 'click', element_id: find(view, 'Ownership changing') }), SitePolicyError);
     for (const y of [193, 243, 293, 343, 493]) await assert.rejects(session.perform({ type: 'click', x: 144, y }), SitePolicyError);
     assert.equal(posts, 0);
     console.log(JSON.stringify({ passed: true, defaultButtons: true, loginModalWithoutCredentials: true, modalClose: true,

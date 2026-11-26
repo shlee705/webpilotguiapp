@@ -1,4 +1,4 @@
-import type { AgentEvent, AiSettings, LoginCredentials, MessageRole, ReportResult } from './types';
+import type { AgentEvent, AiSettings, ApiProvider, BackendRunOptions, BackendSettings, LoginCredentials, MessageRole, ReportResult } from './types';
 
 declare global {
   interface Window {
@@ -13,14 +13,17 @@ declare global {
       endOverlay(sessionId: string): Promise<{ ok: boolean; error?: string }>;
       onOverlayStopped(listener: (details: { reason: string }) => void): () => void;
       onMaximizedChange(listener: (maximized: boolean) => void): () => void;
-      getAiSettings(): Promise<AiSettings>;
-      saveAiSettings(options: { model: string; apiKey?: string; forgetKey?: boolean }): Promise<AiSettings>;
-      testAiConnection(options: { model: string; apiKey?: string }): Promise<{ ok: boolean; error?: string; models?: string[] }>;
-      startAiChat(options: { requestId: string; messages: { role: MessageRole; content: string }[]; model: string; targetUrl?: string; maxActions?: number; credentials?: LoginCredentials }): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
+      getAiSettings(provider?: ApiProvider): Promise<AiSettings>;
+      saveAiSettings(options: { provider?: ApiProvider; model: string; apiKey?: string; forgetKey?: boolean }): Promise<AiSettings>;
+      testAiConnection(options: { provider?: ApiProvider; model: string; apiKey?: string }): Promise<{ ok: boolean; error?: string; models?: string[] }>;
+      getBackendSettings(): Promise<BackendSettings>;
+      saveBackendSettings(options: { provider?: ApiProvider; models?: { plan: string; triage: string }; apiKey?: string; forgetKey?: boolean }): Promise<BackendSettings>;
+      testBackendConnection(options: { provider?: ApiProvider; models?: { plan: string; triage: string }; apiKey?: string }): Promise<{ ok: boolean; error?: string }>;
+      startAiChat(options: { requestId: string; messages: { role: MessageRole; content: string }[]; provider?: ApiProvider; model: string; targetUrl?: string; backendOptions?: BackendRunOptions; backendTask?: string; backendLoginUrl?: string; credentials?: LoginCredentials }): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
       cancelAiChat(requestId: string): Promise<unknown>;
       onAiEvent(listener: (details: { requestId: string; event: AgentEvent }) => void): () => void;
       getCapture(id: string): Promise<{ ok: boolean; imageUrl?: string; error?: string }>;
-      refreshReport(): Promise<ReportResult>;
+      refreshReport(runId?: string): Promise<ReportResult>;
       openReport(id: string): Promise<{ ok: boolean; error?: string }>;
       readReport(id: string): Promise<{ ok: true; data: Uint8Array } | { ok: false; error: string }>;
     };

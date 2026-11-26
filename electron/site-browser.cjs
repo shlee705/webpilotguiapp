@@ -220,6 +220,18 @@ function matchesLoginRequest(request, permit, credentials, now = Date.now()) {
     && [...body.keys()].every(key => permit.fields.includes(key));
 }
 
+function matchesLoginPreparationRequest(request, permit, submitted, now = Date.now()) {
+  if (!permit || permit.used || now > permit.expires || !submitted || permit.mode !== 'spa'
+    || !request.mainFrame || request.navigation || !['GET', 'HEAD'].includes(request.method)) return false;
+  let destination;
+  try { destination = new URL(request.url); } catch { return false; }
+  // Some login clients obtain their CSRF cookie/token immediately before the
+  // credential POST. Permit that read only after the guarded native submission;
+  // keystroke handlers and arbitrary reads remain blocked while typing secrets.
+  return destination.origin === permit.allowedOrigin && !destination.username && !destination.password
+    && !destination.search && !destination.hash && /(?:^|\/)(?:csrf|xsrf)(?:[-_]token)?(?:\.json)?\/?$/i.test(destination.pathname);
+}
+
 class SitePolicyError extends Error {
   constructor(message) { super(message); this.name = 'SitePolicyError'; }
 }
@@ -241,6 +253,14 @@ function validateTargetUrl(value) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new SitePolicyError('계정 정보가 없는 HTTP(S) 주소만 사용할 수 있습니다.');
   if (isBlockedPath(url)) throw new SitePolicyError('상태를 변경할 수 있는 주소는 탐색할 수 없습니다.');
   return url;
+}
+
+// Only native backend progress can request this synchronization. It has the same
+// navigation boundary as a normal tour and is never a model action.
+function validateBackendFollowUrl(value, startUrl) {
+  const target = validateTargetUrl(value);
+  if (target.origin !== validateTargetUrl(startUrl).origin) throw new SitePolicyError('백엔드 표시 화면은 처음 지정한 사이트 안에서만 이동할 수 있습니다.');
+  return target;
 }
 
 function isBlockedPath(value) {
@@ -275,7 +295,59 @@ function requestPolicy({ url, method, navigation, ownedPage }, allowedOrigin) {
   return null;
 }
 
-async function startSiteSession({ url: input, signal, onStatus = () => {}, credentials: suppliedCredentials, taskPermissions: suppliedTaskPermissions }) {
+function installVisualPointer() {
+  // This page-only pointer follows real mouse events, never a progress timer.
+  if (window !== window.top) return;
+  let host;
+  let pointer;
+  let ring;
+  let hidden = false;
+  let position = { x: 24, y: 24 };
+  const style = (element, values, important = false) => { for (const [name, value] of Object.entries(values)) element.style.setProperty(name, value, important ? 'important' : ''); };
+  function mount() {
+    if (host?.isConnected || !document.documentElement) return;
+    if (host) { document.documentElement.append(host); return; }
+    host = document.createElement('div');
+    host.setAttribute('data-webpilot-visual-pointer', 'true');
+    host.setAttribute('aria-hidden', 'true');
+    // Shadow DOM protects the SVG, but page styles still apply to the host.
+    // In particular, overflow:hidden on div used to clip this zero-size host.
+    style(host, { all: 'initial', position: 'fixed', top: '0', left: '0', right: 'auto', bottom: 'auto', width: '0', height: '0',
+      margin: '0', padding: '0', border: '0', overflow: 'visible', visibility: 'visible', opacity: '1', transform: 'none',
+      'clip-path': 'none', clip: 'auto', contain: 'none', 'z-index': '2147483647', 'pointer-events': 'none', display: hidden ? 'none' : 'block' }, true);
+    const shadow = host.attachShadow({ mode: 'closed' });
+    pointer = document.createElement('div');
+    style(pointer, { position: 'absolute', transform: `translate(${position.x}px, ${position.y}px)`, 'pointer-events': 'none' });
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', '25'); svg.setAttribute('height', '31'); svg.setAttribute('viewBox', '0 0 25 31');
+    style(svg, { display: 'block', filter: 'drop-shadow(0 2px 3px #00000035)' });
+    const shape = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    shape.setAttribute('d', 'M3 2.5v23.8l6.2-6 4.5 9 4.2-2.2-4.5-8.7 8.4-.8L3 2.5Z');
+    shape.setAttribute('fill', '#19191d'); shape.setAttribute('stroke', '#ffffff'); shape.setAttribute('stroke-width', '1.6'); shape.setAttribute('stroke-linejoin', 'round');
+    svg.append(shape);
+    ring = document.createElement('span');
+    style(ring, { position: 'absolute', left: '-13px', top: '-13px', width: '34px', height: '34px', border: '1px solid #30303655', 'border-radius': '50%', background: '#1d1d2210', opacity: '0' });
+    pointer.append(ring, svg); shadow.append(pointer); document.documentElement.append(host);
+  }
+  const api = Object.freeze({
+    move(x, y) {
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      position = { x: Math.max(0, Math.min(innerWidth - 1, x)), y: Math.max(0, Math.min(innerHeight - 1, y)) };
+      mount();
+      if (pointer) pointer.style.transform = `translate(${position.x}px, ${position.y}px)`;
+    },
+    position: () => ({ ...position }),
+    click() { mount(); if (!matchMedia('(prefers-reduced-motion: reduce)').matches) ring?.animate([{ opacity: .85, transform: 'scale(.2)' }, { opacity: 0, transform: 'scale(1.8)' }], { duration: 500, easing: 'ease-out' }); },
+    visible(value) { hidden = !value; mount(); if (host) host.style.setProperty('display', hidden ? 'none' : 'block', 'important'); },
+  });
+  Object.defineProperty(window, '__webpilotVisualPointer', { value: api, writable: false, configurable: false });
+  addEventListener('mousemove', event => api.move(event.clientX, event.clientY), { capture: true, passive: true });
+  addEventListener('resize', () => api.move(position.x, position.y), { passive: true });
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount, { once: true });
+  else mount();
+}
+
+async function startSiteSession({ url: input, signal, onStatus = () => {}, credentials: suppliedCredentials, taskPermissions: suppliedTaskPermissions, followBackend = false }) {
   const target = validateTargetUrl(input);
   const credentials = validateCredentials(suppliedCredentials);
   const redact = createSecretRedactor(credentials);
@@ -290,6 +362,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
   let browserPid;
   let focusController;
   let capturedViewport;
+  let pointerPosition = { x: 24, y: 24 };
   let closed = false;
   let closePromise;
   let lastBlocked = '';
@@ -303,6 +376,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
   let loginAttempted = false;
   let privateInputStarted = false;
   let loginInputInProgress = false;
+  let lastLoginResponse;
   let readinessDirty = true;
   let expectPageChange = false;
   let activitySince = Date.now();
@@ -369,12 +443,14 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       try { mainFrame = request.frame() === page.mainFrame(); } catch { /* Worker requests cannot authenticate. */ }
       const requestDetails = { url: request.url(), method: request.method(), navigation: request.isNavigationRequest(), mainFrame, contentType: request.headers()['content-type'], body: request.postData() };
       const loginRequest = ownedPage && matchesLoginRequest(requestDetails, loginPermit, credentials);
+      const preparationCandidate = loginInputInProgress && ownedPage && matchesLoginPreparationRequest(requestDetails, loginPermit, true);
+      const loginPreparation = preparationCandidate && await page.evaluate(() => window.__webpilotLoginForm?.submitted()).catch(() => false);
       if (ownedPage && mainFrame && request.method() === 'POST' && contentPermit && !contentPermit.used) {
         contentPermit.submitted ||= await page.evaluate(() => window.__webpilotContentForm?.submitted()).catch(() => false);
       }
       const contentRequest = ownedPage && matchesContentSubmission(requestDetails, contentPermit);
       let reason = loginRequest || contentRequest ? null : requestPolicy({ url: request.url(), method: request.method(), navigation: request.isNavigationRequest(), ownedPage }, allowedOrigin);
-      if (loginInputInProgress && !loginRequest) reason = '로그인 입력 중 부가 네트워크 요청';
+      if (loginInputInProgress && !loginRequest && !loginPreparation) reason = '로그인 입력 중 부가 네트워크 요청';
       if (privateInputStarted && new URL(request.url()).origin !== allowedOrigin) reason = '로그인 입력 이후 외부 연결';
       if (credentials && redact(request.url()) !== request.url()) reason = '계정 정보가 포함된 URL 요청';
       if (reason) { if (request.isNavigationRequest()) pendingNavigation = undefined; blocked(reason); await route.abort('blockedbyclient').catch(() => {}); return; }
@@ -392,11 +468,24 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         contentPermit.used = true;
         contentPermit.completion = new Promise(resolve => { finishContent = resolve; });
       }
-      if (!request.isNavigationRequest() && !loginRequest && !contentRequest) { await route.continue().catch(() => {}); return; }
+      if (!request.isNavigationRequest() && !loginRequest && !loginPreparation && !contentRequest) { await route.continue().catch(() => {}); return; }
       try {
         // Chromium's normal redirect chain bypasses subsequent Playwright routes.
         // Fetch one hop only, then turn an allowed redirect into a fresh navigation.
         const response = await route.fetch({ maxRedirects: 0, timeout: 20000 });
+        if (matchedLoginPermit) {
+          matchedLoginPermit.httpStatus = response.status();
+          if (/application\/json/i.test(response.headers()['content-type'] ?? '')) {
+            const bytes = await response.body();
+            if (bytes.length <= 1048576) {
+              try {
+                const result = JSON.parse(bytes.toString('utf8'));
+                matchedLoginPermit.rejected = result?.ok === false || result?.success === false || Boolean(result?.error)
+                  || ['error', 'failed', 'rejected'].includes(result?.status);
+              } catch { /* The response body alone never confirms authentication. */ }
+            }
+          }
+        }
         if (matchedContentPermit) {
           matchedContentPermit.httpStatus = response.status();
           if (/application\/json/i.test(response.headers()['content-type'] ?? '')) {
@@ -413,6 +502,10 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         }
         const location = response.headers().location;
         if ([301, 302, 303, 307, 308].includes(response.status()) && location) {
+          if (loginPreparation) {
+            blocked('로그인 준비 요청의 리디렉션은 지원하지 않습니다');
+            await route.abort('blockedbyclient'); return;
+          }
           if (matchedContentPermit?.mode === 'spa') {
             matchedContentPermit.failure = '등록 요청 뒤 리디렉션 응답이 발생하여 완료 여부를 확인할 수 없습니다.';
             await route.abort('blockedbyclient'); return;
@@ -519,55 +612,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
           busy: [...document.querySelectorAll('[aria-busy="true"]')].some(element => element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden') }),
       }) });
     });
-    await context.addInitScript(() => {
-      // A fixed visual pointer accompanies real page mouse events. It is not an
-      // OS cursor and is removed from screenshots sent to the model.
-      if (window !== window.top) return;
-      let host;
-      let pointer;
-      let ring;
-      let hidden = false;
-      const style = (element, values) => { for (const [name, value] of Object.entries(values)) element.style.setProperty(name, value); };
-      function mount() {
-        if (host?.isConnected || !document.documentElement) return;
-        if (host) { document.documentElement.append(host); return; }
-        host = document.createElement('div');
-        host.setAttribute('data-webpilot-visual-pointer', 'true');
-        host.setAttribute('aria-hidden', 'true');
-        style(host, { position: 'fixed', top: '0', left: '0', width: '0', height: '0', 'z-index': '2147483647', 'pointer-events': 'none', display: hidden ? 'none' : 'block' });
-        const shadow = host.attachShadow({ mode: 'closed' });
-        pointer = document.createElement('div');
-        style(pointer, { position: 'absolute', transform: 'translate(24px, 24px)', transition: 'transform 140ms cubic-bezier(.22,.8,.3,1)', 'pointer-events': 'none' });
-        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        svg.setAttribute('width', '25'); svg.setAttribute('height', '31'); svg.setAttribute('viewBox', '0 0 25 31');
-        style(svg, { display: 'block', filter: 'drop-shadow(0 2px 3px #00000035)' });
-        const shape = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        shape.setAttribute('d', 'M3 2.5v23.8l6.2-6 4.5 9 4.2-2.2-4.5-8.7 8.4-.8L3 2.5Z');
-        shape.setAttribute('fill', '#19191d'); shape.setAttribute('stroke', '#ffffff'); shape.setAttribute('stroke-width', '1.6'); shape.setAttribute('stroke-linejoin', 'round');
-        svg.append(shape);
-        ring = document.createElement('span');
-        style(ring, { position: 'absolute', left: '-13px', top: '-13px', width: '34px', height: '34px', border: '1px solid #30303655', 'border-radius': '50%', background: '#1d1d2210', opacity: '0' });
-        pointer.append(ring, svg); shadow.append(pointer); document.documentElement.append(host);
-      }
-      const api = Object.freeze({
-        move(x, y) {
-          mount();
-          const transform = `translate(${x}px, ${y}px)`;
-          if (!pointer || pointer.style.transform === transform) return;
-          return new Promise(resolve => {
-            const done = () => { clearTimeout(timer); pointer.removeEventListener('transitionend', done); resolve(); };
-            const timer = setTimeout(done, 170);
-            pointer.addEventListener('transitionend', done, { once: true });
-            pointer.style.transform = transform;
-          });
-        },
-        click() { mount(); ring?.animate([{ opacity: .85, transform: 'scale(.2)' }, { opacity: 0, transform: 'scale(1.8)' }], { duration: 700, easing: 'ease-out' }); },
-        visible(value) { hidden = !value; mount(); if (host) host.style.display = hidden ? 'none' : 'block'; },
-      });
-      Object.defineProperty(window, '__webpilotVisualPointer', { value: api, writable: false, configurable: false });
-      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount, { once: true });
-      else mount();
-    });
+    await context.addInitScript(installVisualPointer);
     await context.newPage();
     windowSession = await context.newCDPSession(page);
     const initialWindow = await windowSession.send('Browser.getWindowForTarget');
@@ -581,6 +626,17 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
     page.on('dialog', dialog => { blocked('사이트 대화상자'); void dialog.dismiss().catch(() => {}); });
     page.on('filechooser', () => blocked('파일 선택 창'));
     page.setDefaultTimeout(5000);
+    const restorePointer = async () => {
+      pointerPosition = await readWithNavigationRecovery({ signal, assertActive,
+        read: () => page.evaluate(position => {
+          const pointer = window.__webpilotVisualPointer;
+          if (!pointer) throw new Error('화면 포인터를 준비하지 못했습니다.');
+          pointer.move(position.x, position.y);
+          return pointer.position();
+        }, pointerPosition),
+        recover: async () => { await settleNavigation(); await sleep(30, undefined, { signal }); },
+      });
+    };
     page.on('framenavigated', frame => {
       if (frame === page.mainFrame()) { readinessDirty = true; activitySince = Date.now(); }
     });
@@ -597,7 +653,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
     };
     const settlePage = async () => {
       await settleNavigation();
-      if (!readinessDirty) return;
+      if (!readinessDirty) { await restorePointer(); return; }
       await waitForPageReady({ signal, expectChange: expectPageChange, read: async () => {
         assertActive();
         const state = await readWithNavigationRecovery({ signal, assertActive,
@@ -609,6 +665,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
       await settleNavigation();
       readinessDirty = false;
       assertActive();
+      await restorePointer();
     };
     const markAction = (expectChange = true) => { readinessDirty = true; expectPageChange = expectChange; activitySince = Date.now(); };
     await settlePage();
@@ -627,10 +684,17 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
     };
     const viewportSize = () => page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
     const movePointer = async (x, y) => {
-      await Promise.all([
-        page.evaluate(({ x, y }) => window.__webpilotVisualPointer?.move(x, y), { x, y }),
-        page.mouse.move(x, y, { steps: 4 }),
-      ]);
+      const from = await page.evaluate(() => ({ ...window.__webpilotVisualPointer.position(), reduced: matchMedia('(prefers-reduced-motion: reduce)').matches }));
+      const steps = from.reduced ? 1 : 12;
+      for (let index = 1; index <= steps; index++) {
+        assertActive();
+        const progress = 1 - (1 - index / steps) ** 3;
+        pointerPosition = { x: from.x + (x - from.x) * progress, y: from.y + (y - from.y) * progress };
+        // Each rendered intermediate position comes from a real mouse event.
+        await page.mouse.move(pointerPosition.x, pointerPosition.y);
+        if (index < steps) await sleep(16, undefined, { signal });
+      }
+      await restorePointer();
       assertActive();
     };
     const clickPointer = async () => { await page.evaluate(() => window.__webpilotVisualPointer?.click()); };
@@ -788,6 +852,7 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         await settlePage();
         const used = loginPermit?.used;
         const failure = loginPermit?.failure;
+        lastLoginResponse = { used: Boolean(used), httpStatus: loginPermit?.httpStatus, rejected: Boolean(loginPermit?.rejected) };
         loginPermit = undefined;
         assertActive();
         if (failure) throw new SitePolicyError(failure);
@@ -804,6 +869,74 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
         await page.evaluate(() => window.__webpilotLoginForm?.clear()).catch(() => {});
         await Promise.allSettled([user, password, submit, form].filter(Boolean).map(handle => handle.dispose()));
       }
+    };
+    const authenticationView = async () => {
+      assertActive();
+      const view = await page.evaluate(() => {
+        const visible = element => Boolean(element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden');
+        const text = document.body?.innerText ?? '';
+        return {
+          loginVisible: [...document.querySelectorAll('input[type=password]')].some(visible),
+          authenticatedMarker: [...document.querySelectorAll('a,button,[role=button]')].some(element =>
+            /(?:log\s*out|sign[\s_-]*out|로그아웃)/i.test([element.textContent, element.getAttribute('aria-label'), element.getAttribute('title')].filter(Boolean).join(' '))),
+          rejected: /아이디나 비밀번호가 틀|로그인.{0,12}실패|비밀번호.{0,12}(틀|잘못|일치하지)|invalid (credentials|password|username)|incorrect (password|username)|login failed|sign.?in failed/i.test(text),
+          nonempty: Boolean(text.trim()),
+        };
+      });
+      return { ...view, challenged: await challengePresent() };
+    };
+    const authenticate = async () => {
+      assertActive();
+      const before = JSON.stringify(await context.storageState({ indexedDB: true }));
+      const beforeView = await authenticationView();
+      await login();
+      const result = (state, message) => ({ url: redact(page.url()), message, login: { status: state } });
+      if (lastLoginResponse?.rejected || lastLoginResponse?.httpStatus >= 400) {
+        return result('rejected', '화면 표현용 Edge의 로그인 요청이 거절되었습니다. 계정과 로그인 화면을 확인해 주세요.');
+      }
+      // A CSRF cookie and a dismissed login form are insufficient. The page
+      // must gain an authenticated control and retain it after navigation.
+      const safeView = view => view.nonempty && !view.loginVisible && !view.rejected && !view.challenged;
+      let view = await authenticationView();
+      if (view.rejected) return result('rejected', '화면 표현용 Edge에서 로그인 실패 화면을 확인했습니다.');
+      if (!lastLoginResponse?.used || !(lastLoginResponse.httpStatus >= 200 && lastLoginResponse.httpStatus < 400)
+        || !safeView(view) || JSON.stringify(await context.storageState({ indexedDB: true })) === before) {
+        return result('unconfirmed', '화면 표현용 Edge에서 로그인 제출은 했지만 인증 성공을 확인하지 못했습니다. 자동으로 다시 제출하지 않습니다.');
+      }
+      // Reopen the actual landing URL with the existing Edge session. This also
+      // verifies that subsequent backend-follow navigation retains authentication;
+      // a client-only form dismissal or an in-memory login cannot pass this check.
+      const landing = validateBackendFollowUrl(page.url(), target.href);
+      readinessDirty = true;
+      expectPageChange = true;
+      activitySince = Date.now();
+      const response = await page.goto(landing.href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await settlePage();
+      view = await authenticationView();
+      if (!response?.ok() || !safeView(view) || page.url() !== landing.href) {
+        return result('unconfirmed', '화면 표현용 Edge에서 페이지를 다시 열었을 때 로그인 상태 유지를 확인하지 못했습니다.');
+      }
+      let authenticated = view.authenticatedMarker && !beforeView.authenticatedMarker;
+      if (!authenticated) {
+        // No extra page or visible window: an empty context makes one anonymous
+        // GET to the same landing, without following redirects or loading assets.
+        // This supports protected pages that do not render a logout control.
+        const anonymous = await browser.newContext({ serviceWorkers: 'block' });
+        try {
+          assertActive();
+          const probe = await anonymous.request.get(landing.href, { maxRedirects: 0, timeout: 10000 });
+          authenticated = [401, 403].includes(probe.status());
+          if ([301, 302, 303, 307, 308].includes(probe.status()) && probe.headers().location) {
+            const redirect = new URL(probe.headers().location, landing.href);
+            authenticated = redirect.origin === allowedOrigin && !redirect.username && !redirect.password
+              && redirect.pathname === target.pathname && redirect.pathname !== landing.pathname;
+          }
+        } catch { /* An unavailable anonymous check is not authentication evidence. */ }
+        finally { await anonymous.close(); }
+        assertActive();
+      }
+      if (!authenticated) return result('unconfirmed', '화면 표현용 Edge에서 로그인 전후의 인증 차이를 확인하지 못했습니다.');
+      return result('confirmed', '화면 표현용 Edge의 로그인과 페이지 이동 후 로그인 상태 유지를 확인했습니다.');
     };
     const submitContent = async elementId => {
       if (submissionAttempted) throw new SitePolicyError('이번 작업에서는 콘텐츠 등록을 한 번만 허용합니다. 다시 제출하지 않습니다.');
@@ -857,6 +990,55 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
     };
 
     const session = {
+      authenticate,
+      async followBackendUrl(value) {
+        assertActive();
+        if (!followBackend) throw new SitePolicyError('백엔드 화면 동기화가 설정되지 않은 세션입니다.');
+        const destination = validateBackendFollowUrl(value, target.href);
+        if (redact(destination.href) !== destination.href) throw new SitePolicyError('계정 정보가 포함된 주소로 이동하지 않습니다.');
+        await foreground();
+        await clearSnapshot();
+        if (page.url() !== destination.href) {
+          // When the next observed backend page is a visible exact link here,
+          // show the real pointer travelling to it before native navigation.
+          // A direct navigation is not a click: do not pulse or invoke handlers.
+          const candidate = await page.evaluateHandle(destination => {
+            const matches = [...document.querySelectorAll('a[href]')].filter(element => {
+              if (!(element instanceof HTMLAnchorElement) || element.href !== destination || element.closest('form,[inert]') || element.hasAttribute('download')
+                || element.hasAttribute('form') || element.getAttribute('aria-disabled') === 'true'
+                || element.target && element.target.toLowerCase() !== '_self') return false;
+              const bounds = element.getBoundingClientRect();
+              return bounds.width > 0 && bounds.height > 0 && bounds.bottom > 0 && bounds.right > 0 && bounds.left < innerWidth && bounds.top < innerHeight
+                && getComputedStyle(element).visibility === 'visible';
+            });
+            return matches.length === 1 ? matches[0] : null;
+          }, destination.href);
+          try {
+            const link = candidate.asElement();
+            const metadata = await link?.evaluate(element => ({ href: element.href,
+              label: [element.innerText, element.getAttribute('aria-label'), element.title].filter(Boolean).join(' ') })).catch(() => null);
+            if (metadata?.href === destination.href && !isSensitiveControl(metadata.label) && redact(metadata.href) === metadata.href) {
+              try {
+                const point = await checkedPoint(link);
+                await movePointer(point.x, point.y);
+              } catch (error) {
+                if (signal?.aborted) signal.throwIfAborted();
+                if (!(error instanceof SitePolicyError)) throw error;
+                // A missing/covered link does not prevent the observed backend
+                // page from being opened through the existing URL policy.
+              }
+            }
+          } finally { await candidate.dispose(); }
+          lastBlocked = '';
+          readinessDirty = true;
+          expectPageChange = true;
+          activitySince = Date.now();
+          await page.goto(destination.href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await settlePage();
+        }
+        assertActive();
+        return { url: redact(page.url()) };
+      },
       async observe() {
         assertActive();
         await foreground();
@@ -1095,4 +1277,4 @@ async function startSiteSession({ url: input, signal, onStatus = () => {}, crede
   }
 }
 
-module.exports = { startSiteSession, validateTargetUrl, validateAction, validateDomAction, matchesLoginRequest, matchesContentSubmission, validateTaskPermissions, isForbiddenContentContext, requestPolicy, isBlockedPath, SitePolicyError, SiteInteractionError, sanitizeInteractionError, VIEWPORT, waitForPageReady, typingDelay, readWithNavigationRecovery, isStandaloneButton, isSensitiveControl, normalizeInputText, readPageElement, inputChunks };
+module.exports = { startSiteSession, installVisualPointer, validateTargetUrl, validateBackendFollowUrl, validateAction, validateDomAction, matchesLoginRequest, matchesLoginPreparationRequest, matchesContentSubmission, validateTaskPermissions, isForbiddenContentContext, requestPolicy, isBlockedPath, SitePolicyError, SiteInteractionError, sanitizeInteractionError, VIEWPORT, waitForPageReady, typingDelay, readWithNavigationRecovery, isStandaloneButton, isSensitiveControl, normalizeInputText, readPageElement, inputChunks };

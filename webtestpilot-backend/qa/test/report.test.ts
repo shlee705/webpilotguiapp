@@ -1,0 +1,333 @@
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { chromium } from 'playwright';
+import { buildReport, noticesIn, renderHtml, writeReport } from '../src/report.ts';
+import type { Plan } from '../src/plan.ts';
+
+const browser = await chromium.launch();
+const url = 'http://app.test/list';
+after(() => browser.close());
+
+/** 저장된 실행 결과 폴더(cli가 쓰는 모양)를 만든다. 페이지 문구에 HTML이 섞여 있다. */
+function savedRun(): string {
+  const dir = fileURLToPath(new URL(`../runs/test-report-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, import.meta.url));
+  mkdirSync(join(dir, 'run', 'evidence'), { recursive: true });
+  const url = 'http://app.test/list';
+  const plan: Plan = {
+    version: 1, requirements: [], unplanned: [], questions: [{ id: 'Q1', page: url, question: '쿠폰은 중복되나요?', options: ['예', '아니요'], feature: 'F1' }],
+    features: [{ id: 'F1', name: '담기', page: url }], observations: [{ page: url, note: '<b>배지</b>가 늦게 바뀜' }],
+    targets: {
+      T1: { target: { role: 'button', anchor: '^Orb Lamp$', of: 1 }, group: false, url },
+      T2: { target: { role: 'listitem', within: { role: 'list', name: '^담은 상품$' } }, group: true, url },
+    },
+    scenarios: ['S1', 'S2'].map(id => ({ id, title: id === 'S1' ? '<script>alert(1)</script> 담기' : '두 번째', covers: ['F1'], start: { url },
+      steps: [{ id: `${id}.A1`, op: 'click' as const, target: 'T1' }],
+      checks: [{ id: `${id}.C1`, after: `${id}.A1`, target: 'T2', read: 'count' as const, op: 'equals' as const, expected: '1',
+        source: { kind: 'inferred' as const, rule: 'action-has-effect', quote: '담기를 누르면 목록이 늘어난다' } }] })),
+  };
+  writeFileSync(join(dir, 'plan.json'), JSON.stringify(plan));
+  writeFileSync(join(dir, 'run', 'policy.json'), JSON.stringify({ origins: ['http://app.test'] }));
+  writeFileSync(join(dir, 'run', 'results.json'), JSON.stringify({ problems: [], requirements: [], scenarios: ['S1', 'S2'].map(id => ({
+    id, valid: true, invalid: [], start: 'ok', precondition: 'none', blocked: [], violations: [],
+    steps: [{ id: `${id}.A1`, status: 'ok', evidence: [`evidence/${id}.A1.after.png`], ...(id === 'S1' ? { captureErrors: ['screenshot: 시간 초과'] } : {}) }],
+    checks: [{ id: `${id}.C1`, status: id === 'S1' ? 'mismatch' : 'not_run', source: 'inferred', expected: '1', actual: '0', evidence: [`evidence/${id}.C1.png`] }], ...(id === 'S1' ? { signalsDropped: 3 } : {}) })) }));
+  const system = { requirement: {}, autonomous: { bug_medium: 1, incomplete: 1 }, preparation: {}, variant: {} };
+  writeFileSync(join(dir, 'run', 'verdicts.json'), JSON.stringify({ file: 'verdicts.json', stage: 'done', requirements: [], system, variants: [], features: [],
+    pendingQuestions: plan.questions,
+    errorSignals: [{ kind: 'http', text: 'GET 500', path: 'http://app.test/api', status: 500, at: [{ scenario: 'S1', after: 'S1.A1' }] },
+      { kind: 'http', text: 'GET 403', path: 'http://app.test/admin', status: 403, normal: true, at: [{ scenario: 'S1', after: 'S1.A1' }] }],
+    verdicts: [
+      { id: 'S1.C1', scenario: 'S1', kind: 'check', requirements: [], observed: 'mismatch', class: 'app_defect_candidate', triage: { reason: '목록이 늘지 않음', quotes: [] },
+        reproduction: 'reproduced', system: { level: 'bug_medium', reason: '일반 규칙 위반, 재현됨' } },
+      { id: 'S2.C1', scenario: 'S2', kind: 'check', requirements: [], observed: 'not_run', class: 'not_run', cause: 'S2.A1', system: { level: 'incomplete', reason: '실행 안 됨(원인 S2.A1)' } },
+      { id: 'S2.A1', scenario: 'S2', kind: 'act', requirements: [], observed: 'not_executed:target_changed:0', class: 'automation_failure', triage: { reason: '대상을 잘못 찾음', quotes: [] }, captureErrors: ['aria: 페이지 닫힘'],
+        system: { level: 'not_bug', reason: '자동화 실패로 분류(원래 결과는 보존)' } },
+    ] }));
+  // 중간에 멈춘 재판정 파일. 끝난 판정(verdicts.json)을 가리면 안 된다.
+  writeFileSync(join(dir, 'run', 'verdicts-2.json'), JSON.stringify({ stage: 'preclassified', verdicts: [], system: {}, requirements: [] }));
+  // 기록 중에 멈춰 깨진 재판정 파일. 보고서 생성을 막지 않는다.
+  writeFileSync(join(dir, 'run', 'verdicts-3.json'), '{"stage": "tri');
+  writeFileSync(join(dir, 'explore.json'), JSON.stringify({ complete: false, sitemap: { templates: [{ key: url, pages: [url] }, { key: 'http://app.test/cart', pages: ['http://app.test/cart'] }],
+    visited: [url], failed: [], unvisited: ['http://app.test/help'],
+    audit: [{ url, findings: [{ kind: 'covered-control', viewport: 'mobile', level: 'ui_defect', target: 'button "담기"', detail: 'button "담기" 를 div "" 가 가림', confirmed: true },
+      { kind: 'unnamed-control', viewport: 'desktop', level: 'improvement', target: 'button', detail: 'button ("Orb Lamp" 안)', confirmed: false }] }],
+    auditErrors: ['http://app.test/cart: 화면 크기를 바꾸지 못함'] },
+    conversations: [{ template: url, stop: 'done', planned: true, turns: 9 }, { template: 'http://app.test/cart', stop: 'stalled', planned: false, turns: 12, detail: '화면이 바뀌지 않는 행동 8번 연속' }] }));
+  writeFileSync(join(dir, 'summary.json'), JSON.stringify({ startUrl: url, spentUsd: 1.23456, budgetUsd: 10, timingMs: { total: 125_000 } }));
+  // 실패 시점 스크린샷(1x1 PNG)
+  writeFileSync(join(dir, 'run', 'evidence', 'S1.C1.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
+  return dir;
+}
+
+test('backend provider and selected models are retained in the actual report without changing verdicts', () => {
+  const dir = savedRun();
+  const before = buildReport(dir);
+  const summary = JSON.parse(readFileSync(join(dir, 'summary.json'), 'utf8'));
+  const models = { plan: 'gpt-6.2-sol', triage: 'gpt-6-luna' };
+  writeFileSync(join(dir, 'summary.json'), JSON.stringify({ ...summary, provider: 'openai', models }));
+  const result = buildReport(dir);
+  assert.equal(result.run.provider, 'openai');
+  assert.deepEqual(result.run.models, models);
+  assert.deepEqual(result.run.verdicts, before.run.verdicts);
+  assert.equal(result.run.endReason, before.run.endReason);
+  assert.ok(renderHtml(result, dir).includes('gpt-6.2-sol'));
+});
+
+test('failed page navigation remains incomplete even when an old model submitted a completed empty plan', () => {
+  const dir = savedRun();
+  const failed = 'http://127.0.0.1:5173/';
+  const ex = JSON.parse(readFileSync(join(dir, 'explore.json'), 'utf8'));
+  ex.complete = true;
+  ex.sitemap = { templates: [{ key: failed, pages: [failed] }], visited: [], unvisited: [failed], failed: [failed],
+    failedReasons: { [failed]: 'page.goto: net::ERR_CONNECTION_REFUSED private-api-secret at http://private.test/?token=private-token' } };
+  ex.conversations = [{ template: failed, planned: true, stop: 'done', turns: 1 }];
+  writeFileSync(join(dir, 'explore.json'), JSON.stringify(ex));
+  const report = buildReport(dir);
+  assert.equal(report.run.endReason, 'incomplete');
+  assert.ok(report.run.incompleteReasons.some(reason => reason.includes('연결 거부') && reason.includes('5173')));
+  assert.match(report.coverage.failedReasons![failed], /서버가 실행 중인지/);
+  const html = renderHtml(report, dir);
+  assert.match(html, /ERR_CONNECTION_REFUSED/);
+  assert.equal(JSON.stringify(report).includes('private-api-secret'), false);
+  assert.equal(html.includes('private-token'), false);
+  // Legacy report/2 files remain renderable when no structured reason exists.
+  delete report.coverage.failedReasons;
+  assert.match(renderHtml(report, dir), /열지 못해 그 페이지를 탐색·검사하지 못함/);
+});
+
+test('actual backend run parameters are preserved alongside provider and models in report JSON', () => {
+  const dir = savedRun();
+  const summary = JSON.parse(readFileSync(join(dir, 'summary.json'), 'utf8'));
+  const parameters = { budgetUsd: 1.5, exploreMinutes: 4, maxPages: 6, maxTemplates: 3, turnsPerTemplate: 8,
+    maxTurns: 12, pagesPerTemplate: 2, concurrency: 1, workers: 1, planEffort: 'low', sessions: 'template' };
+  writeFileSync(join(dir, 'summary.json'), JSON.stringify({ ...summary, parameters }));
+  assert.deepEqual(buildReport(dir).run.parameters, parameters);
+});
+
+test('보고서 영역: 사이트 구조의 묶음별로 발견을 세고, 여러 페이지에 같은 대상으로 나온 점검은 공통 영역으로 한 번만 보인다', () => {
+  const dir = savedRun();
+  const old = buildReport(dir);
+  assert.deepEqual(old.areas?.map(a => [a.kind, a.templates.map(t => [t.template, t.bugs])]), [['all', [[url, 1], ['http://app.test/cart', 0]]]],
+    '구조 정보가 없는 예전 실행은 영역 하나(전체)');
+  const ex = JSON.parse(readFileSync(join(dir, 'explore.json'), 'utf8'));
+  const [cart, help] = ['http://app.test/cart', 'http://app.test/help'];
+  const info = (links: string[]) => ({ links: links.map(to => ({ to, text: '', layout: false })), search: false, shape: '', api: [], forms: [] });
+  const unnamed = { kind: 'unnamed-control', viewport: 'desktop', level: 'improvement', target: 'button', detail: 'button', confirmed: true };
+  ex.sitemap = { ...ex.sitemap, templates: [...ex.sitemap.templates, { key: help, pages: [help] }], visited: [url, cart, help],
+    structure: { [url]: info([cart, help]), [cart]: info([]), [help]: info([]) },
+    audit: [...ex.sitemap.audit, ...[cart, help].map(u => ({ url: u, findings: [unnamed] }))] };
+  ex.sitemap.audit[0].findings.push(unnamed);
+  writeFileSync(join(dir, 'explore.json'), JSON.stringify(ex));
+  const r = buildReport(dir);
+  assert.deepEqual(r.areas!.map(a => [a.kind, a.hub, a.templates.map(t => [t.template, t.bugs, t.ui, t.improvements])]),
+    [['hub', url, [[url, 1, 1, 0], [cart, 0, 0, 0], [help, 0, 0, 0]]]], '목록 페이지가 중심 노드, 공통 영역 점검은 종류별 개수에서 뺀다');
+  assert.deepEqual(r.commonAudit?.map(a => [a.kind, a.pages]), [['unnamed-control', 3]]);
+  assert.equal(r.improvements.length, 3, 'report.json의 페이지별 점검 목록은 그대로다');
+  const html = renderHtml(r, dir);
+  assert.ok(html.includes('공통 영역 발견 (1종)'));
+  assert.ok(html.includes('<th>영역</th><td>/list에서 이어지는 페이지 › /list</td>'), '발견마다 영역과 페이지 종류를 보인다');
+});
+
+test('보고서: 판정을 구역으로 나누고, 사람이 따라 할 절차·근거·증거를 남기며, 미완료와 범위 밖을 숨기지 않는다', async () => {
+  const dir = savedRun();
+  const r = buildReport(dir);
+  assert.deepEqual([r.version, r.run.startUrl, r.run.endReason, r.run.spentUsd], ['report/2', 'http://app.test/list', 'incomplete', 1.2346]);
+  assert.deepEqual(r.run.verdicts, { file: 'verdicts.json', stage: 'done', later: [{ file: 'verdicts-3.json', stage: 'unreadable' }, { file: 'verdicts-2.json', stage: 'preclassified' }] },
+    '끝난 판정을 쓰고, 그 뒤의 끝나지 않았거나 읽을 수 없는 재판정을 함께 남긴다');
+  assert.deepEqual(r.run.incompleteReasons, ['http://app.test/cart: stalled (화면이 바뀌지 않는 행동 8번 연속)'], '계획 못 한 페이지 종류와 사유');
+  assert.match(r.run.scope.writes, /차단/);
+  assert.deepEqual(r.bugs.map(b => [b.id, b.level, b.basis]), [['S1.C1', 'bug_medium', 'autonomous']]);
+  assert.deepEqual(r.bugs[0].steps, ['http://app.test/list 열기', '"Orb Lamp" 영역의 버튼 누르기'], '이름 없는 버튼도 라벨 영역으로, 읽는 말로 적는다');
+  assert.deepEqual([r.bugs[0].check!.target, r.bugs[0].check!.expected, r.bugs[0].check!.actual, r.bugs[0].reproduction], ['"담은 상품" 목록 안의 목록 항목', '1', '0', { result: 'reproduced' }]);
+  assert.deepEqual(r.bugs[0].evidence, ['run/evidence/S1.C1.png']);
+  assert.deepEqual(r.evidenceGaps, { total: 1, items: ['S1.A1: screenshot: 시간 초과'] }, '통과한 행동의 증거 수집 실패도 센다');
+  assert.deepEqual(r.incomplete.byReason, { '실행 안 됨(앞 항목에서 멈춤)': 1, '자동화 실패로 분류(원래 결과 보존)': 1 }, '사유는 항목 ID 없이 종류로 세고, 자동화 실패도 미완료 구역에 보인다');
+  assert.deepEqual(r.passed, { checks: 0, byClass: {} }, '통과는 실제 통과한 검사만 센다(자동화 실패는 통과가 아니다)');
+  assert.deepEqual([r.errorSignals.map(g => g.status), r.normalRejections], [[500, 403], 1], '정상 거절일 수 있는 신호도 지우지 않고 표시만 한다');
+  assert.deepEqual([r.uiDefects.map(a => [a.kind, a.viewport]), r.improvements, r.auditUnconfirmed.map(a => a.kind), r.auditErrors],
+    [[['covered-control', 'mobile']], [], ['unnamed-control'], ['http://app.test/cart: 화면 크기를 바꾸지 못함']],
+    '확인된 점검 발견만 UI 결함·개선 제안으로 세고, 확인하지 못한 것과 점검 실패는 따로 남긴다');
+  assert.deepEqual(r.coverage.templates.find(t => t.template === url)!.executedPages, [url]);
+  assert.deepEqual([r.questions.map(q => q.id), r.observations.length, r.coverage.unvisitedLinks], [['Q1'], 1, ['http://app.test/help']]);
+
+  const html = renderHtml(r, dir);
+  assert.ok(html.includes('UI 결함 (1) · 개선 제안 (0)') && html.includes('확인하지 못한 점검 발견 (1)') && html.includes('정상 거절일 수 있음'));
+  assert.ok(html.includes('<td>S2.A1</td>') && html.includes('대상을 잘못 찾음'), '미완료 구역에 항목·원래 결과·분류 근거를 보인다');
+  assert.ok(html.includes('수집 실패: aria: 페이지 닫힘'), '미완료 항목 표에도 증거 수집 실패를 보인다');
+  assert.ok(html.includes('not_executed:target_changed:0'), '부록의 판정 못 한 항목에 원래 결과를 남긴다');
+  assert.ok(html.includes('수집 상한을 넘어 버린 신호 3건'), '버린 오류 신호 수를 숨기지 않는다');
+  // 시각 판정이 개선 제안뿐이면 UI 결함 타일에 넣지 않는다.
+  const onlyImprovement = renderHtml({ ...r, bugs: [], visual: [{ ...r.bugs[0], level: 'improvement' }] }, dir);
+  assert.ok(onlyImprovement.includes('<p class="num">1</p><p class="tlabel">UI 버그</p>'), '점검 UI 결함 1건만 센다');
+  // 버그 개수(02): 발견 단위, 유형·도메인별. 규칙 action-has-effect는 기능, 점검 가림은 UI.
+  assert.deepEqual([r.bugs[0].bugType, r.uiDefects[0].bugType?.type], [{ type: 'function', basis: '일반 규칙 action-has-effect' }, 'ui']);
+  assert.deepEqual(r.bugTypes, { total: 2, function: 1, routing: 0, ui: 1, input: 0, byOrigin: [{ origin: 'http://app.test', total: 2, function: 1, routing: 0, ui: 1, input: 0 }] });
+  assert.ok(html.includes('<td>http://app.test</td><td class="nw"><b class="hi">2</b></td>'), '도메인 표');
+  assert.ok(html.includes('<h2><span class="no">03</span>버그 (2)</h2>') && html.includes('<h2><span class="no">06</span>판정하지 못한 항목 (2)</h2>'), '03~06을 도메인마다 보인다');
+  assert.ok(html.includes('1.1 기대 동작</th><td>&quot;담은 상품&quot; 목록 안의 목록 항목 — 1개') && html.includes('1.2 실제 동작</th><td>개수: 0'), '대상별 기대·실제');
+  assert.ok(html.includes('<td class="nw">요청 오류 응답</td><td>500 GET 500</td><td>/api</td>'), '오류 신호 표: 종류 | 응답 | 경로');
+  const { targetText } = await import('../src/report.ts');
+  assert.equal(targetText({ role: 'link', name: '^Shop$', href: '/shop', nth: 1, of: 2 }), '"Shop" 링크 (주소 /shop) (2개 중 2번째)', '주소로 구별한 링크는 주소도 적는다');
+  assert.equal(targetText({ text: String.raw`^(?!\s*Quantity\s*$)\s*\S.{0,39}$`, anchor: '^Quantity$' }), '"Quantity" 영역의 요소','읽는 말로 못 옮기는 정규식은 보이지 않는다');
+  assert.equal(targetText({ role: 'paragraph', name: String.raw`^\d+ pieces? saved$` }), '문단', '선택 문법이 남으면 이름을 빼고 역할만');
+  assert.equal(targetText({ role: 'paragraph', name: String.raw`^\d+ pieces saved \(total\)$` }), '"… pieces saved (total)" 문단', '숫자 자리는 …, 이스케이프한 괄호는 글자로');
+  assert.equal(targetText({ role: 'paragraph', name: '^.*? (?:pieces|piece) saved$' }), '"… pieces saved" 문단', '단·복수 짝은 처음 본 형태로');
+  assert.ok(!html.includes('<script>alert(1)</script>') && html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), '페이지에서 온 글자는 HTML로 해석하지 않는다');
+  assert.ok(!html.includes('<b>배지</b>'));
+  assert.ok(html.includes('data:image/png;base64,'), '버그 항목에는 실패 시점 화면을 넣는다');
+
+  // 발견 제목: AI가 없으면 기대 동작 + 검사 기록으로 만든 실제 한 줄
+  assert.ok(html.includes('<p class="label">실제 동작</p><p>&quot;담은 상품&quot; 목록 안의 목록 항목의 개수 0 (기대 1)'), html.match(/실제 동작<\/p><p>[^<]*/)?.[0] ?? '실제 줄 없음');
+
+  // AI 제목: 기록에 없는 숫자는 돌려보내고, 고친 제목만 남긴다. 판정은 그대로다.
+  const { writeHeadlines } = await import('../src/headline.ts');
+  const { checkHeadline, actualLine, headlineFacts, findingGroups } = await import('../src/report.ts');
+  const { Budget } = await import('../src/agent.ts');
+  const titles = ['담기 뒤 목록 항목이 3개로 보임', '담기 버튼을 눌러도 목록 항목이 0개(기대 1개)'];
+  const seen: string[] = [];
+  const h = await writeHeadlines({ dir, model: 'claude-sonnet-5-5', budget: new Budget(1), send: async req => {
+    const last = req.messages.at(-1)!;
+    if (Array.isArray(last.content) && last.content[0].type === 'tool_result') seen.push(String((last.content[0] as { content: unknown }).content));
+    const text = titles.shift()!;
+    return { id: 'm', type: 'message', role: 'assistant', model: req.model, stop_reason: 'tool_use', stop_sequence: null,
+      content: [{ type: 'tool_use', id: `t${titles.length}`, name: 'headline', input: { text } }],
+      usage: { input_tokens: 10, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as never;
+  } });
+  assert.match(seen[0], /숫자 3은 검사 기록/);
+  assert.deepEqual(Object.values(h).map(x => x.text), ['담기 버튼을 눌러도 목록 항목이 0개(기대 1개)']);
+  const titled = buildReport(dir);
+  assert.deepEqual(titled.bugs.map(b => b.level), r.bugs.map(b => b.level), '제목은 판정을 바꾸지 않는다');
+  const titledHtml = renderHtml(titled, dir);
+  assert.ok(titledHtml.includes('담기 버튼을 눌러도 목록 항목이 0개(기대 1개)') && titledHtml.includes('<p class="label">기대 동작</p><p>&lt;script&gt;'), '제목 아래에 기대 동작을 남긴다');
+  assert.deepEqual(checkHeadline('"Orb Lamp" 버튼', 'x "Orb Lamp" 영역'), []);
+  assert.deepEqual(checkHeadline('"Orb Lampe" 버튼', 'x "Orb Lamp" 영역'), ['인용 "Orb Lampe"은 검사 기록에 그대로 없습니다']);
+  assert.match(checkHeadline('가'.repeat(61), '')[0], /60자 이내/);
+  // 분류 근거(AI 판단)·영향 페이지 수에만 있는 숫자는 대조에 쓰지 않는다.
+  const facts = headlineFacts(findingGroups(titled)[0]);
+  assert.ok(facts.text.includes('분류 근거') && !facts.verifiable.includes('분류 근거'));
+  // 판정이 바뀌어 사실이 달라졌거나 손으로 고친 제목(대조 실패)은 쓰지 않는다.
+  const saved = JSON.parse(readFileSync(join(dir, 'headlines.json'), 'utf8'));
+  const key = Object.keys(saved)[0];
+  writeFileSync(join(dir, 'headlines.json'), JSON.stringify({ [key]: { ...saved[key], facts: 'stale' } }));
+  const stale = buildReport(dir);
+  assert.deepEqual([stale.headlines?.[key], stale.headlinesRejected], [undefined, 1], '예전 사실로 만든 제목은 버리고 버린 수를 남긴다');
+  assert.ok(renderHtml(stale, dir).includes('0개 사용, 1개 버림'));
+  writeFileSync(join(dir, 'headlines.json'), JSON.stringify({ [key]: { ...saved[key], text: '목록 항목이 7개로 보임' } }));
+  assert.equal(buildReport(dir).headlines?.[key], undefined, '대조를 통과하지 못한 제목');
+  writeFileSync(join(dir, 'headlines.json'), JSON.stringify(saved));
+  assert.equal(buildReport(dir).headlinesRejected, 0);
+  // 지문은 판정 데이터를 담는다: 필드 하나만 바뀌어도 지문이 바뀐다(보고서 문구는 지문에 들어가지 않는다).
+  const { factsHash } = await import('../src/report.ts');
+  const b0 = titled.bugs[0];
+  const changed = [
+    { ...b0, page: 'http://app.test/other' }, { ...b0, steps: [...b0.steps, '하나 더'] }, { ...b0, level: 'bug_high' as const },
+    { ...b0, check: { ...b0.check!, actual: '9' } }, { ...b0, classification: { ...b0.classification, reason: '다른 근거' } },
+    { ...b0, visual: { criteria: [{ text: '조건', status: 'unmet', evidence: '다른 화면' }] } },
+  ];
+  for (const c of changed) assert.notEqual(factsHash([c]), factsHash([b0]), JSON.stringify(c).slice(0, 80));
+  assert.equal(factsHash([structuredClone(b0)]), factsHash([b0]));
+  assert.match(factsHash([b0]), /^d1:/, '지문 형식 표시');
+  // 비교 방식마다 실패의 뜻을 바꾸지 않고 쓴다.
+  const item = (op: string, read: string, expected: string, actual: string) => actualLine({ ...r.bugs[0], check: { ...r.bugs[0].check!, op, read, expected, actual, target: '카드' } });
+  assert.equal(item('not_equals', 'items', '["a"]', '["a"]'), '카드: 달라야 할 목록과 같음');
+  assert.equal(item('sorted_asc', 'items', 'number', '["3","1"]'), '카드: 오름차순이 아님');
+  assert.equal(item('all_contain', 'items', 'Lamp', '["Lamp","Vase"]'), '카드: "Lamp" 미포함 항목 있음');
+  assert.equal(item('less', 'text', '10', '12'), '카드의 글자 12 (기대: 10보다 작음)');
+  assert.equal(actualLine({ ...r.bugs[0], visual: { criteria: [{ text: '제목이 헤더에 가려지지 않는다', status: 'met' }, { text: '버튼이 보인다', status: 'unmet', evidence: '헤더가 버튼 위를 덮음' }] } }),
+    '화면 조건 2개 중 1개 위반 — 헤더가 버튼 위를 덮음', '시각 판정은 첫 위반 조건의 근거를 붙인다');
+  assert.equal(item('same_number', 'count', '2 pieces saved', '1'), '카드의 개수 1 (기대: "2 pieces saved"의 숫자와 같음)');
+
+  // 저장된 결과로 보고서만 다시 만든다. 다시 만들어도 같은 report.json이다.
+  const first = await writeReport(dir, browser);
+  assert.ok(first.pdf, first.pdfError ?? "PDF 없음");
+  assert.equal(readFileSync(first.pdf!).subarray(0, 4).toString(), '%PDF');
+  const before = readFileSync(join(dir, 'report.json'), 'utf8');
+  await writeReport(dir, browser);
+  assert.equal(readFileSync(join(dir, 'report.json'), 'utf8'), before);
+});
+
+test('버그 유형: 규칙·읽기·앞선 입력으로 나누고, 애매하면 시각 > 입력 규칙 > 이동 규칙 > 그 밖의 규칙 > 앞선 입력 > 주소 순서', async () => {
+  const { bugTypeOf } = await import('../src/report.ts');
+  const targets = { T1: { target: { role: 'textbox', name: '^Password$' } }, T2: { target: { role: 'searchbox' } } } as unknown as Plan['targets'];
+  const steps = [{ id: 'S.A1', op: 'fill' as const, target: 'T1', value: '12345678' }, { id: 'S.A2', op: 'click' as const, target: 'T3' }];
+  const chk = (read: string, rule?: string, after = 'S.A2') => ({ id: 'S.C1', after, read, op: 'equals', expected: 'x', source: { kind: rule ? 'inferred' : 'constraint', ...(rule ? { rule } : {}) } }) as never;
+  const t = (c: never, st = steps, visual = false) => bugTypeOf(c, st, targets, visual).type;
+  assert.equal(t(chk('text', 'required-input')), 'input');
+  assert.equal(t(chk('visible', 'no-error-page')), 'routing');
+  assert.equal(t(chk('url', 'link-target')), 'routing');
+  assert.equal(t(chk('value', 'action-has-effect')), 'function', '값을 넣었어도 다른 버튼 효과를 보는 일반 규칙은 기능');
+  assert.equal(t(chk('url')), 'input', '규칙 없이 값을 넣은 뒤 가입이 받아들여졌는지 본 검사는 입력 검증');
+  assert.equal(t(chk('text'), [steps[1]]), 'function');
+  assert.equal(t(chk('url'), [steps[1]]), 'routing', '값 입력 없이 이동 뒤 주소를 본 검사');
+  assert.equal(t(chk('text'), [{ ...steps[0], target: 'T2' }, steps[1]]), 'function', '검색칸 입력은 입력 검증으로 보지 않는다');
+  assert.equal(t(chk('text', undefined, 'start')), 'function', '입력 전에 본 검사');
+  assert.equal(t(chk('visual', 'content-readable')), 'ui');
+  assert.equal(t(chk('text', 'spelling')), 'ui', '품질 규칙(3묶음)');
+  assert.equal(t(chk('text', 'required-input'), steps, true), 'ui', '시각 판정이 가장 먼저');
+  assert.equal(bugTypeOf(undefined, steps, targets, false).type, 'function', '행동 실패');
+});
+
+test('행동 실행 집계: 시도 기준 실패율, 시도하지 못한 행동의 원인, 같은 대상의 반복 실패', async () => {
+  const { actionSummary } = await import('../src/report.ts');
+  const step = (id: string, target?: string) => ({ id, op: 'click' as const, ...(target ? { target } : {}) });
+  const plan = { scenarios: [
+    { id: 'S1', steps: [step('S1.A1', 'T1'), step('S1.A2', 'T2')] },
+    // 같은 버튼을 다른 ID(T3)로 pin했다. 반복 실패는 같은 대상으로 묶는다.
+    { id: 'S2', steps: [step('S2.A1', 'T3')] },
+    { id: 'S3', steps: [step('S3.A1')] },
+    { id: 'S4', steps: [step('S4.A1')] },
+    { id: 'S5', steps: [step('S5.A1')] },
+  ], targets: { T1: { target: { role: 'button', name: '^담기$' } }, T3: { target: { role: 'button', name: '^담기$' } } } } as unknown as Plan;
+  const res = (id: string, steps: { id: string; status: string; reason?: string }[], extra = {}) =>
+    [id, { id, valid: true, invalid: [], start: 'ok', precondition: 'none', steps, checks: [], blocked: [], violations: [], ...extra }] as const;
+  const a = actionSummary(plan, new Map<string, any>([
+    res('S1', [{ id: 'S1.A1', status: 'not_executed', reason: 'target_changed' }, { id: 'S1.A2', status: 'not_run' }]),
+    res('S2', [{ id: 'S2.A1', status: 'uncertain_execution' }]),
+    res('S3', [{ id: 'S3.A1', status: 'ok' }]),
+    res('S4', [{ id: 'S4.A1', status: 'not_run' }], { start: 'failed' }),
+    res('S5', [{ id: 'S5.A1', status: 'ok' }], { valid: false }),
+  ]));
+  assert.deepEqual(a, { planned: 6, attempted: 3, completed: 1, notExecuted: { target_changed: 1 }, uncertain: 1,
+    notRun: { '앞 행동에서 멈춤': 1, '시작 실패': 1 }, invalid: 1, policyBlocked: 0, failureRate: 0.667, repeated: [{ target: 'T1', failures: 2, steps: ['S1.A1', 'S2.A1'] }] });
+});
+
+test('공통 원인 의심: 실패 시점 화면 알림(status·alert)에 같은 글자가 보인 발견을 묶어 보이고, 판정은 바꾸지 않는다', async () => {
+  // 실제 Playwright snapshot 형식(기본·ai 모드)에서 알림 글자만 읽는지 확인한다.
+  const page = await browser.newPage();
+  await page.setContent('<div role="status">crypto.randomUUID is not a function</div><div role="alert">저장 실패</div><p>보통 글</p><div role="status"></div>');
+  for (const aria of [await page.locator('body').ariaSnapshot(), await page.locator('body').ariaSnapshot({ mode: 'ai' })]) {
+    assert.deepEqual(noticesIn(aria), ['crypto.randomUUID is not a function', '저장 실패'], aria);
+  }
+  await page.close();
+
+  const dir = savedRun();
+  const v = JSON.parse(readFileSync(join(dir, 'run', 'verdicts.json'), 'utf8'));
+  // S2도 같은 앱 오류 뒤에 실패한 버그로 바꾼다.
+  v.verdicts[1] = { ...v.verdicts[0], id: 'S2.C1', scenario: 'S2' };
+  writeFileSync(join(dir, 'run', 'verdicts.json'), JSON.stringify(v));
+  const res = JSON.parse(readFileSync(join(dir, 'run', 'results.json'), 'utf8'));
+  for (const s of res.scenarios) s.checks[0] = { ...s.checks[0], status: 'mismatch', evidence: [`evidence/${s.id}.C1.aria.txt`] };
+  writeFileSync(join(dir, 'run', 'results.json'), JSON.stringify(res));
+  // S2의 알림은 같은 오류 문구 뒤에 안내가 붙는다. 짧은 "Saved"는 둘 다 보여도 우연일 수 있어 묶지 않는다.
+  writeFileSync(join(dir, 'run', 'evidence', 'S1.C1.aria.txt'), '- main:\n  - status: crypto.randomUUID is not a function\n  - alert: S1에만 있는 알림\n  - status: Saved\n');
+  writeFileSync(join(dir, 'run', 'evidence', 'S2.C1.aria.txt'), '- main:\n  - status: crypto.randomUUID is not a function Your unsaved input is retained.\n  - status: Saved\n');
+  const r = buildReport(dir);
+  assert.deepEqual(r.commonNotices, [{ text: 'crypto.randomUUID is not a function', findings: ['S1', 'S2'] }], '한 발견에만 보인 알림·짧은 알림은 묶지 않는다');
+  assert.deepEqual(r.bugs.map(x => x.level), ['bug_medium', 'bug_medium'], '판정은 그대로');
+  assert.match(renderHtml(r, dir), /같은 화면 알림<\/b> — 발견 1, 2/);
+  // 알림이 하나의 발견에만 있으면 칸이 없다.
+  writeFileSync(join(dir, 'run', 'evidence', 'S2.C1.aria.txt'), '- main:\n  - status: 다른 알림\n');
+  assert.equal(buildReport(dir).commonNotices, undefined);
+});
+
+test('로그인을 요청했지만 확인하지 못하면 검사 결과가 있어도 실행은 미완료다', () => {
+  const dir = savedRun();
+  const summary = JSON.parse(readFileSync(join(dir, 'summary.json'), 'utf8'));
+  writeFileSync(join(dir, 'summary.json'), JSON.stringify({ ...summary, login: { status: 'failed', reason: '2단계 인증은 자동 로그인에서 지원하지 않음' } }));
+  const report = buildReport(dir);
+  assert.equal(report.run.endReason, 'incomplete');
+  assert.ok(report.run.incompleteReasons.some(reason => reason.includes('로그인 이후 기능 미검사')));
+});

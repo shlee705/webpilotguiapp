@@ -1,0 +1,88 @@
+// 일반 웹 규칙 목록 (설계 3.3, 5장 6단계). 요구사항이 없을 때 `inferred` 근거는 이 목록의 규칙 ID를 인용한다.
+import type { Op } from './plan.ts';
+// 공통 엔진의 데이터이며 사이트별 규칙을 넣지 않는다. 앱 고유 규칙은 업무 규칙 질문의 답으로 앱 설정에 둔다.
+// group 1 = 거의 예외 없음, 2 = 대부분 맞지만 앱마다 다름, 3 = 품질·사용성(조작을 막으면 UI 결함, 아니면 개선 제안).
+// shortcut: 3묶음(품질·사용성)과 적용 조건의 자동 확인은 없다. 비교 형태(form)만 검증하고, 결정적 관계 규칙만 확신 높음, 나머지는 최대 확신 중간(Q22 제한 승인).
+// shortcut: form 'any' 규칙(no-error-page, invalid-input-feedback, required-input)은 고정 기대값을 허용해 관찰값 고정 우회가 남는다(판정은 최대 확신 중간).
+// shortcut: page-changes의 not_equals는 같은 항목의 순서만 바뀌어도 통과한다. 항목 집합 비교 연산이 필요해지면 추가한다.
+// shortcut: effect-shown-elsewhere는 같은 이름의 항목이 이미 있으면 새 항목이 없어도 통과한다. 고유한 입력값은 지시로만 요구한다. 실측에서 보이면 행동 전 목록에 그 값이 없다는 선행조건을 강제한다.
+// 권한 기대는 일반 규칙으로 추정하지 않는다. 화면 안내(constraint)·요구사항·업무 규칙 질문으로만 표현한다.
+
+/**
+ * form: 하네스가 검증하는 비교 형태. relation = 관측 참조(expected_from) 필수, bound = less·greater만, items = 목록 조건만, any = 제한 없음.
+ * 관찰한 결함 값을 규칙 ID만 붙여 정답으로 고정하는 것을 막는다. offset = 관측 참조에 증감 단위(+1 등)가 필요함.
+ */
+/** deterministic: 화면에서 읽은 두 값을 하네스가 직접 비교해 판정이 정해지는 규칙. 위반이면 확신 높음까지 허용한다(Q22 제한 승인 2026-10-16). */
+/** ops: 이 규칙에 쓸 수 있는 비교 연산(없으면 형태 검사만). */
+/** form visual: 계산할 수 없어 스크린샷을 보고 조건별로 판정하는 규칙(read visual, op satisfies). */
+/** form hidden: 기대값이 규칙에서 정해진다(read visible, op equals, expected "false"). 관찰값을 정답으로 쓸 여지가 없다. 앞선 시점의 visible true 검사가 필요하다. */
+/** read: 형태와 별도로 요구하는 읽기(relation이면서 목록을 비교하는 규칙). 안내(ruleForm)와 검사(checkSource)가 같은 필드를 쓴다 */
+export type Rule = { id: string; group: 1 | 2 | 3; rule: string; applies: string; exceptions?: string; form: 'relation' | 'bound' | 'items' | 'any' | 'visual' | 'hidden'; offset?: true; deterministic?: true;
+  read?: 'items';
+  ops?: Op[] };
+
+export const RULES: Rule[] = [
+  { id: 'link-target', group: 1, rule: '링크·카드에 적힌 대상과 눌렀을 때 열린 대상이 같다',
+    applies: '링크·카드의 텍스트가 대상의 이름을 나타낼 때 (클릭 전 이름을 read text로 읽고, 클릭 후 열린 페이지의 제목·이름을 read text로 읽어 expected_from으로 비교. 주소(url)는 이름이 아니므로 비교하지 않는다)', form: 'relation', ops: ['equals'], deterministic: true },
+  { id: 'no-error-page', group: 1, rule: '이동·행동의 결과가 서버 오류(5xx)나 같은 origin의 없는 페이지(404)가 아니다',
+    applies: '허용 범위 안의 링크·버튼', exceptions: '401·403 권한 거절, 422 검증 응답', form: 'any' },
+  { id: 'action-has-effect', group: 1, rule: '활성 상태의 행동 버튼을 누르면 화면·URL·요청 중 하나가 바뀐다',
+    applies: '눌러서 무언가를 하라는 이름·아이콘의 활성 버튼 (누르기 전 값과 not_equals로 비교)', exceptions: '이미 선택된 탭, 같은 값 다시 저장', form: 'relation', ops: ['not_equals'] },
+  // 모델이 action-has-effect에 고정값("닫힌 뒤 안 보임")을 쓰다 거부되던 경우(이메일 사이트 11/3 A·B). 닫기는 앱과 무관한 대화상자·메뉴 패턴이다(WAI-ARIA).
+  { id: 'close-dismisses', group: 1, rule: '닫기·취소 버튼이나 Escape를 누르면 열려 있던 메뉴·대화상자·패널이 닫혀 보이지 않는다',
+    applies: '열린 메뉴·대화상자·패널과 그 닫기 컨트롤(행동 전에 열려 있음을 visible true로 확인해 두면 좋다)', exceptions: '닫기 전에 저장 여부를 묻는 확인 창이 뜨는 경우', form: 'hidden', ops: ['equals'] },
+  { id: 'disabled-inert', group: 1, rule: '비활성 컨트롤은 눌러도 동작하지 않는다', applies: 'disabled 상태로 표시된 컨트롤 (누르기 전 값과 equals로 비교)', form: 'relation', ops: ['equals'] },
+  { id: 'count-matches-list', group: 1, rule: '화면의 개수 문구와 실제로 보이는 항목 수가 같다',
+    applies: '문구가 지금 보이는 목록의 개수를 나타낼 때 (op same_number로 숫자끼리 비교)', exceptions: '문구가 전체 개수이고 목록은 일부 페이지만 보일 때', form: 'relation', ops: ['same_number', 'equals'], deterministic: true },
+  { id: 'filter-matches', group: 2, rule: '필터·카테고리를 고르면 그 조건에 맞는 항목만 보인다', applies: '목록 필터·카테고리 선택',
+    exceptions: '추천 항목을 섞어 보여 주는 화면', form: 'items', ops: ['all_equal', 'all_contain'] },
+  { id: 'reset-restores', group: 2, rule: '초기화·전체 보기를 누르면 처음 상태로 돌아간다', applies: '필터·입력 초기화 컨트롤',
+    exceptions: '정렬 등 일부 설정을 유지하도록 설계된 경우', form: 'relation', ops: ['equals', 'same_number'] },
+  { id: 'quantity-bounds', group: 2, rule: '상품 수량처럼 0이 의미 없는 개수는 1보다 작아질 수 없다', applies: '최소값 1이 화면에 보이거나(감소 버튼 비활성 등) 0개가 의미 없는 개수 선택 (greater 0 또는 less로 비교). 0을 허용할 수 있는 인원·수치는 묻기', exceptions: '0을 삭제로 쓰는 장바구니', form: 'bound' },
+  { id: 'step-by-one', group: 2, rule: '증가·감소 컨트롤은 값을 한 단위 바꾼다', applies: '수량·숫자 증감 버튼 (누르기 전 값을 expected_from으로, 누른 횟수만큼 offset)', form: 'relation', ops: ['equals', 'same_number'], offset: true },
+  { id: 'invalid-input-feedback', group: 2, rule: '잘못된 입력은 받아들여지지 않고 안내가 나오며, 결과 값이 바뀌지 않는다',
+    applies: '형식·값 검사가 있는 입력', exceptions: '서버에서만 검사하는 앱', form: 'any' },
+  { id: 'same-action-same-result', group: 2, rule: '같은 상태에서 같은 동작을 하면 같은 결과가 나온다', applies: '결정적인 기능',
+    exceptions: '추천·무작위 기능', form: 'relation', ops: ['equals'] },
+  { id: 'sort-order', group: 2, rule: '정렬 기준을 고르면 목록이 그 기준의 순서로 놓인다', applies: '정렬 선택 후 정렬 기준 값이 든 항목들(group)을 items로 읽어 sorted_asc·sorted_desc로 비교 (expected는 정렬 기준: 숫자 기준이면 number, 글자 기준이면 text)',
+    exceptions: '고정 공지처럼 정렬과 상관없이 위에 두는 항목', form: 'items', ops: ['sorted_asc', 'sorted_desc'] },
+  { id: 'page-changes', group: 2, rule: '다음·이전 페이지로 넘기면 보이는 항목이 바뀐다', applies: '페이지 넘김 컨트롤 (넘기기 전 목록 항목들(group)을 items로 읽어 두고, 넘긴 뒤 items를 expected_from으로 not_equals 비교)',
+    exceptions: '마지막 페이지에서 다음 누름', form: 'relation', read: 'items', ops: ['not_equals'] },
+  { id: 'required-input', group: 2, rule: '필수 입력을 비우거나 형식에 맞지 않게 제출하면 제출되지 않고 안내가 나온다', applies: '필수 표시나 형식 안내가 있는 입력 폼',
+    exceptions: '서버에서만 검사하는 앱', form: 'any', ops: ['contains', 'not_equals', 'equals'] },
+  { id: 'effect-shown-elsewhere', group: 2, rule: '앱이 행동의 결과를 알렸으면(완료 안내·개수 증가) 그 결과를 모아 보여 주는 다른 화면에도 반영돼 있다',
+    applies: '추가·등록·저장 같은 행동 뒤 결과를 모아 보여 주는 화면 (입력값은 기존 항목과 겹치지 않는 고유한 값으로 넣고, 행동 전에 그 값을 읽어 두고, 결과 화면의 항목들(group)을 items로 읽어 expected_from으로 any_equal·any_contain 비교)',
+    exceptions: '검토·승인 뒤에 보이도록 설계된 경우', form: 'relation', read: 'items', ops: ['any_equal', 'any_contain'] },
+  { id: 'state-persists', group: 2, rule: '새로고침하거나 뒤로 갔다 와도 사용자가 바꾼 상태가 유지된다', applies: '앱이 반영한 상태(저장한 설정, 추가한 항목, 고른 필터·탭). 저장하지 않은 입력칸은 제외',
+    exceptions: '의도적으로 세션 단위로 두는 상태', form: 'relation', ops: ['equals', 'same_number'] },
+  // 계산 점검(③ auditPage: 이름 없음·가림·가로 넘침)으로 잡히지 않는 화면 판단. 범용 표현 언어 대신 조건 문장과 시각 판정을 쓴다(설계 6.2).
+  { id: 'content-readable', group: 3, rule: '내용과 조작 요소가 다른 요소에 겹치거나 잘리지 않고 읽을 수 있게 보인다',
+    applies: '행동 뒤 또는 화면 크기를 바꾼 뒤 보이는 영역(메뉴·모달·목록·긴 텍스트). 무엇이 어떻게 보여야 하는지 번호 붙인 조건으로 적는다',
+    exceptions: '의도적으로 접어 둔 내용(더보기·말줄임 표시가 있음), 화면 밖으로 스크롤해야 보이는 영역', form: 'visual', ops: ['satisfies'] },
+  // 문구 결함(오타)은 탐색 중 자주 보이지만 표현할 규칙이 없어 관찰로만 남았다(toolshop 11/10: 관찰 35건 중 오타 5종). 대상을 틀린 글자로 고정하면
+  // 고쳐진 화면에서 대상이 사라지므로(식별과 기대값 분리), 문구를 담은 이름 있는 영역을 읽고 올바른 낱말을 contains로 비교한다.
+  { id: 'spelling', group: 3, rule: '메뉴·제목·버튼·라벨 같은 고정 문구는 그 언어의 올바른 철자로 적혀 있다',
+    applies: '사전에 있는 일반 낱말이 틀리게 적힌 고정 문구. 그 문구를 담은 이름 있는 영역(메뉴·폼·카드 영역)이나 페이지를 read text로 읽고, 올바른 낱말을 contains로 비교한다. 대상을 틀린 글자 이름으로 pin하지 않는다',
+    exceptions: '상품명·브랜드·고유명사·사용자가 입력한 내용·약어·의도한 말장난', form: 'any', ops: ['contains'] },
+];
+
+export const RULE_IDS = new Set(RULES.map(r => r.id));
+export const ruleOf = (id?: string) => RULES.find(r => r.id === id);
+
+/**
+ * 규칙마다 계획 검사(plan.ts checkSource)가 요구하는 형식. 같은 필드에서 만들어 안내와 검사가 어긋나지 않는다.
+ * 실측 거부의 60%가 이 형식을 몰라서였다(Opus 4회 실행, 오류 499줄 중 약 300줄, 2026-11-03).
+ */
+export const ruleForm = (r: Rule): string => [
+  r.form === 'relation' ? '기대값은 expected_from(같은 시나리오에서 먼저 읽은 검사 ID)' : '',
+  r.offset ? 'offset 필수(누른 횟수만큼 +n/-n)' : '',
+  r.form === 'bound' ? 'op less 또는 greater' : '',
+  r.form === 'items' || r.read === 'items' ? 'read items' : '',
+  r.form === 'visual' ? 'read visual' : '',
+  r.form === 'hidden' ? '행동 뒤 read visible, expected "false"(앞선 시점에 같은 대상이 열려 있었다는 visible 검사 필요: expected "true" 또는 not_equals + expected_from)' : '',
+  r.ops && r.form !== 'bound' ? `op ${r.ops.join('|')}` : '',
+].filter(Boolean).join(', ');
+
+/** 탐색 프롬프트에 넣을 규칙 목록. */
+export const rulesText = (): string => RULES.map(r =>
+  `- ${r.id} (${r.group === 1 ? '거의 예외 없음' : r.group === 2 ? '앱마다 다를 수 있음' : '품질·사용성, 화면을 보고 판정'}): ${r.rule}. 적용: ${r.applies}${r.exceptions ? `. 예외: ${r.exceptions}` : ''}${ruleForm(r) ? `. 형식: ${ruleForm(r)}` : ''}`).join('\n');

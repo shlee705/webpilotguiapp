@@ -1,0 +1,577 @@
+// ④ 실패 분류와 ⑤ 후보 재실행. 먼저 실행 기록만으로 분류하고, 애매한 항목만 AI가 증거를 인용해 분류한다.
+// 분류는 판정이 아니라 후보 상태다. 결함 후보는 최초 실행에 고정된 입력으로 한 번 재실행해 재현 여부를 별도로 남긴다.
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { blockedSummary, hashRoute, type Policy, type Signal } from './browser.ts';
+import type { Plan } from './plan.ts';
+import { ruleOf } from './rules.ts';
+import { sequence } from './generate.ts';
+import { runPlan, type RunResult } from './run.ts';
+import type { ScenarioResult } from './reconcile.ts';
+import { runAgent, type Budget, type Send, type Tool } from './agent.ts';
+import { judgeVisual, replayVisual, type VisualRecord } from './visual.ts';
+import type { StorageState } from './login.ts';
+import type { ResetResult } from './reset.ts';
+import { privateJson } from './privacy.ts';
+
+const SYSTEM = readFileSync(new URL('../prompts/triage.md', import.meta.url), 'utf8');
+const EVIDENCE_CHARS = 30_000;
+const MIN_QUOTE = 6;
+
+export type Class = 'passed' | 'passed_inferred' | 'passed_observed' | 'mismatch' | 'not_run' | 'invalid' | 'uncertain_execution'
+  | 'precondition_failed' | 'not_applicable'
+  /** 앱 설정이 금지한 행동(로그아웃 등)이라 실행하지 않음. 결함도 자동화 실패도 아니다 */
+  | 'policy_blocked' | 'write_blocked'
+  | 'needs_triage' | 'app_defect_candidate' | 'automation_failure' | 'uncertain'
+  /** 실행하는 컴퓨터의 네트워크가 끊겨 시작 페이지를 못 엶(net::ERR_INTERNET_DISCONNECTED 등). 앱 결함도 자동화 실패도 아니다. 판정 못 함으로 센다 */
+  | 'environment_failure'
+  /** 시각 검사: 판정 대기, 모든 조건 충족 */
+  | 'needs_visual' | 'passed_visual';
+export type Quote = { file: string; text: string };
+export type Verdict = {
+  id: string; scenario: string; kind: 'start' | 'act' | 'check';
+  /** 이 항목이 영향을 주는 요구사항. check는 출처 요구사항, start·act는 시나리오의 covers 전체(기능 F#도 포함). 자율 검사의 기능은 시나리오 covers로 찾는다. */
+  requirements: string[];
+  source?: string;
+  /** 실행 기록에서 본 결과 (예: mismatch, not_executed:target_changed:0, error) */
+  observed: string;
+  error?: string;
+  class: Class;
+  /** not_run이면 시나리오를 멈춘 항목 */
+  cause?: string;
+  triage?: { reason: string; quotes: Quote[] } | { error: string };
+  /** 분류 대화 기록 (실행 폴더 기준 경로) */
+  triageLog?: string;
+  /** 같은 검사의 원본(또는 앞선 복제본) 분류를 공유했으면 그 항목 ID (C4 복제 실행) */
+  triageSharedFrom?: string;
+  /** 이 항목의 실패 시점 증거 수집 실패(aria·screenshot). 실패 시점 snapshot이 없으면 AI 분류를 증거로 확인할 수 없다 */
+  captureErrors?: string[];
+  /** 시각 검사의 조건·촬영·모델 응답·코드 판정·재현 비교 */
+  visual?: VisualRecord;
+  reproduction?: 'reproduced' | 'flaky' | 'reproduction_inconclusive';
+  /** 재현 두 축의 사유(판단 불가일 때). 설명 문장은 reproductionDetail */
+  reproductionReason?: ReproReason;
+  reproductionDetail?: string;
+  /** 쓰기 허용·초기화 없음에서 같은 시나리오 안 앞뒤 비교라 초기화 없이 재실행해 재현함. 서버 상태가 달랐을 수 있어 확신 중간이 상한 */
+  reproducedWithoutReset?: true;
+  /** 단계별 결과 위에 붙이는 시스템 판정 (설계 3.3, 5장 6단계) */
+  system?: { level: SystemLevel; reason: string };
+};
+/** ui_defect·improvement: 시각 검사(일반 규칙 ③ 등) 위반. 조작을 막으면 UI 결함, 아니면 개선 제안. 버그와 따로 센다 */
+/** 재현 판단 불가 사유(설계 6·7단계 "재현 두 축", Q10·Q28) */
+export type ReproReason = 'reset_unavailable' | 'reset_failed' | 'start_differs' | 'execution_incomplete' | 'result_differs' | 'code_changed' | 'login_differs' | 'view_differs' | 'unclear';
+export const REPRO_REASON_TEXT: Record<ReproReason, string> = {
+  reset_unavailable: '초기화 불가', reset_failed: '초기화 실패', start_differs: '시작 상태 다름', execution_incomplete: '실행 미완료',
+  result_differs: '재실행 결과가 최초와 다름', code_changed: '실행 코드 다름', login_differs: '로그인 조건 다름', view_differs: '화면 크기·스크롤 다름', unclear: '재현 결과 판단 불가',
+};
+export type SystemLevel = 'bug_high' | 'bug_medium' | 'not_bug' | 'hold' | 'incomplete' | 'ui_defect' | 'improvement';
+
+/** 실행 기록만으로 하는 1차 분류. 실패 위치만으로 원인을 정하지 않고, 원인을 모르는 실패는 needs_triage로 둔다. */
+// 실행하는 쪽의 연결이 끊긴 것만 뜻하는 오류. 대상 서버가 연결을 거부·시간 초과(CONNECTION_REFUSED·TIMED_OUT)한 것은 앱 쪽 문제일 수 있어 넣지 않는다.
+const LOCAL_NETWORK = /net::ERR_(INTERNET_DISCONNECTED|NETWORK_CHANGED|NAME_NOT_RESOLVED|ADDRESS_UNREACHABLE|NETWORK_ACCESS_DENIED|PROXY_CONNECTION_FAILED)/;
+
+export function preclassify(plan: Plan, run: RunResult): Verdict[] {
+  const out: Verdict[] = [];
+  for (const s of plan.scenarios) {
+    const r = run.scenarios.find(x => x.id === s.id)!;
+    if (!r.valid) {
+      for (const c of s.checks) out.push({ id: c.id, scenario: s.id, kind: 'check', ...origin(c), observed: 'invalid', class: 'invalid', cause: r.invalid.join('; ') });
+      continue;
+    }
+    // 실행 순서대로 훑으며, 시나리오를 멈춘 첫 항목을 뒤의 not_run 원인으로 삼는다.
+    let cause: string | undefined;
+    const deniedAt = r.denied?.[0];
+    let afterDenied = false;
+    for (const x of sequence(s)) {
+      if (deniedAt && !afterDenied && x.call !== 'start' && x.id === deniedAt.after) {
+        afterDenied = true;
+        cause ??= x.id;
+        const st = x.call === 'act' ? r.steps.find(y => y.id === x.id) : undefined;
+        // 행동 자체는 끝났어도(Enter·스크립트 이동) 그 이동이 막혔다. 행동 실패로 이미 기록되면 아래에서 policy_blocked로 바뀐다.
+        if (st?.status === 'ok') out.push({ id: st.id, scenario: s.id, kind: 'act', requirements: s.covers, observed: `ok:denied:${deniedAt.url}`, class: 'policy_blocked' });
+      }
+      if (x.call === 'start') {
+        if (r.start === 'failed') {
+          cause = s.id;
+          // 시작 페이지 요청이 실행 쪽 네트워크 끊김으로 실패했으면 AI 분류 없이 환경 실패로 둔다(toolshop 11/11: 11건이 증거 없음으로 "판단 불가", 분류 호출만 썼음).
+          const net = r.signals?.find(g => g.after === 'start' && g.kind === 'requestfailed' && LOCAL_NETWORK.test(g.text ?? ''));
+          out.push({ id: s.id, scenario: s.id, kind: 'start', requirements: s.covers, observed: 'start_failed', ...(net ? { error: net.text, class: 'environment_failure' as const } : { class: 'needs_triage' as const }) });
+        }
+      } else if (x.call === 'act') {
+        const st = r.steps.find(y => y.id === x.id)!;
+        if (st.status === 'not_executed' || st.status === 'uncertain_execution') {
+          cause ??= st.id;
+          // 복제 실행(C4)에서 이름으로 고정한 대상이 없으면, 페이지마다 다른 이름인지 요소 누락인지 모른다. 숨기지 않고 판단 보류로 둔다(AI 분류는 하지 않음).
+          const missing = s.variantOf && st.reason === 'target_changed' && st.count === 0 && byName(plan, st.id && s.steps.find(y => y.id === st.id)?.target);
+          out.push({ id: st.id, scenario: s.id, kind: 'act', requirements: s.covers, observed: [st.status, st.reason, st.count].filter(v => v !== undefined).join(':'),
+            ...(st.error ? { error: st.error } : {}), ...(st.captureErrors ? { captureErrors: st.captureErrors } : {}), class: st.reason === 'denied_by_app_config' ? 'policy_blocked' : missing ? 'not_applicable' : st.status === 'uncertain_execution' ? 'uncertain_execution' : 'needs_triage' });
+        }
+      } else {
+        const c = s.checks.find(y => y.id === x.id)!;
+        const res = r.checks.find(y => y.id === x.id)!;
+        const base = { id: c.id, scenario: s.id, kind: 'check' as const, ...origin(c), ...(res.error ? { error: res.error } : {}), ...(res.captureErrors ? { captureErrors: res.captureErrors } : {}) };
+        // 근거가 약한 통과는 따로 센다. 관찰값 근거의 통과는 시작 상태 확인이지 기능 검사 통과가 아니다.
+        if (res.status === 'visual_pending') out.push({ ...base, observed: 'visual_pending', class: 'needs_visual' });
+        else if (res.status === 'passed') out.push({ ...base, observed: 'passed', class: c.source.kind === 'inferred' ? 'passed_inferred' : c.source.kind === 'observed' ? 'passed_observed' : 'passed' });
+        // 선행조건 실패는 검사할 상태를 만들지 못한 것이다. 결함 후보로 세지 않고 뒤 항목의 원인으로 남긴다.
+        else if (res.status === 'not_run') out.push({ ...base, observed: 'not_run', class: 'not_run', cause: cause ?? '알 수 없음' });
+        else if (c.precondition) {
+          cause ??= c.id;
+          out.push({ ...base, observed: `precondition:${[res.status, res.count].filter(v => v !== undefined).join(':')}`, class: 'precondition_failed' });
+        }
+        // 복제 실행에서 이름으로 고정한 대상이 그 페이지에 없으면(개수 읽기 제외) 판단 보류. 구조로 고정한 대상이 없으면 요소 누락일 수 있어 그대로 불일치로 둔다.
+        // visible은 대상이 없어도 "false"로 읽히므로 여기서 가른다. 원래 결과(observed)는 바꾸지 않는다.
+        else if (s.variantOf && res.count === 0 && c.read !== 'count' && byName(plan, c.target)) out.push({ ...base, observed: res.status === 'mismatch' ? 'mismatch' : [res.status, res.count].join(':'), class: 'not_applicable' });
+        else if (res.status === 'mismatch') out.push({ ...base, observed: 'mismatch', class: 'mismatch' });
+        else {
+          if (res.status === 'error') cause ??= c.id;
+          out.push({ ...base, observed: [res.status, res.count].filter(v => v !== undefined).join(':'), class: 'needs_triage' });
+        }
+      }
+    }
+    // 막힌 뒤의 통과 못 한 항목은 정책 결과다. 원래 결과(observed)는 그대로 둔다.
+    if (deniedAt) {
+      const order = sequence(s).map(x => x.call === 'start' ? s.id : x.id);
+      const from = order.indexOf(deniedAt.after === 'start' ? s.id : deniedAt.after);
+      for (const v of out) if (v.scenario === s.id && !v.class.startsWith('passed') && order.indexOf(v.id) >= from && from >= 0) { v.class = 'policy_blocked'; v.cause = `앱 설정 금지 주소로 가려다 막힘(${deniedAt.url})`; }
+    }
+    // 쓰기를 막은 실행: 같은 화면에서 한 행동이 앱의 쓰기 요청을 보냈고 우리가 막았다면, 그 행동 바로 뒤의 통과 못 한 검사는 차단의 결과일 수 있다(앱 결함으로 세지 않는다).
+    // 다음 행동 뒤의 검사는 바꾸지 않는다(그 행동 자체의 결함을 숨기지 않는다). 화면을 이동한 행동도 뺀다. 새 화면이 열리며 보낸 요청(읽음 표시 등)은 행동의 결과가 아니고, 이동이 틀린 결함까지 숨기면 안 된다.
+    // shortcut: 시작 화면·이동 뒤에 막힌 쓰기, 행동이 실행 불명확으로 끝난 경우, URL이 같은 SPA 화면 교체는 구분하지 않는다(분류 입력에만 알린다). 실측에서 오탐·누락이 나오면 넓힌다.
+    const sameScreen = new Map((r.writeBlocked ?? []).flatMap(w => {
+      const st = r.steps.find(y => y.id === w.after);
+      // 새 탭을 연 행동은 뺀다(새 탭이 보낸 요청인데 원래 탭 주소는 그대로라 같은 화면처럼 보인다).
+      const sameTab = !r.newTabs?.some(t => t.after === w.after);
+      return st?.status === 'ok' && sameTab && !!st.urlBefore && st.urlBefore === st.url ? [[w.after, w.request] as const] : [];
+    }));
+    for (const v of out) {
+      const after = v.kind === 'check' ? s.checks.find(c => c.id === v.id)?.after : undefined;
+      const request = after && sameScreen.get(after);
+      if (request && v.scenario === s.id && !v.class.startsWith('passed') && !['policy_blocked', 'not_run', 'invalid'].includes(v.class)) {
+        v.class = 'write_blocked'; v.cause = `${after}에서 앱의 쓰기 요청을 막음(${request})`;
+      }
+    }
+  }
+  return out;
+}
+
+/** 이름·텍스트로 신원을 정한 대상인가(페이지마다 이름이 다를 수 있다). 역할·라벨 영역·순서로 정한 대상은 구조 대상이다. */
+const byName = (plan: Plan, id?: string) => { const t = id ? plan.targets[id]?.target : undefined; return !!t && t.anchor === undefined && (t.name !== undefined || t.text !== undefined); };
+
+const origin = (c: Plan['scenarios'][number]['checks'][number]) =>
+  ({ source: c.source.kind, requirements: c.source.kind === 'requirement' && c.source.id ? [c.source.id] : [] });
+
+/**
+ * needs_triage와 mismatch 항목마다 별도 대화로 AI가 분류한다. 결정적인 자동화 오류(예: 읽기 방식 차이)도
+ * 재현되므로 mismatch도 분류한다. 분류는 원래 비교 결과(observed) 위에 덧붙이며 지우지 않는다.
+ * 인용은 제공한 증거 파일에 그대로 있어야 하고, 실패 시점 증거가 있으면 그중 하나 이상을 인용해야 한다.
+ * 분류하지 못한 mismatch는 mismatch로 남겨 재현 대상에 둔다. 대화 기록은 triage/에 남긴다.
+ */
+export async function triage(o: { plan: Plan; run: RunResult; verdicts: Verdict[]; send: Send; model: string; budget: Budget;
+  maxItems?: number; onUpdate?: () => void; logDir?: string; concurrency?: number; system?: string }): Promise<void> {
+  // 판정 회차마다 다른 폴더에 대화를 남긴다. 다시 판정해도 이전 분류의 대화·사용량이 덮이지 않는다.
+  const logDir = o.logDir ?? 'triage';
+  const unclassified = (v: Verdict, error: string) => {
+    // AI가 증거를 보고 고른 판단 불가(uncertain)와 구분한다. 분류를 끝내지 못했으면 아직 분류가 필요한 상태다.
+    v.class = v.observed === 'mismatch' ? 'mismatch' : 'needs_triage';
+    v.triage = { error };
+  };
+  const scenarioOf = new Map(o.plan.scenarios.map(s => [s.id, s]));
+  // 같은 검사(원본 시나리오·같은 검사 번호·같은 결과)는 한 번 분류하고 복제본이 공유한다. 페이지가 달라도 원인 판단(읽기 방식·앱 동작)은 같다.
+  // 실제 값·기대값까지 같아야 같은 원인으로 본다. 값이 다르면 페이지마다 원인이 다를 수 있어 따로 분류한다.
+  const valuesOf = (v: Verdict) => { const c = o.run.scenarios.find(x => x.id === v.scenario)?.checks.find(x => x.id === v.id); return JSON.stringify([c?.expected ?? null, c?.actual ?? null, c?.count ?? null]); };
+  // 시작·행동 실패는 공유하지 않는다. 같은 기록이어도 화면(가림·준비 상태)이 페이지마다 달라 원인이 다를 수 있다.
+  const keyOf = (v: Verdict) => { const s = scenarioOf.get(v.scenario)!; return v.kind !== 'check' ? v.id : `${s.variantOf ?? s.id}${v.id.slice(v.scenario.length)}|${v.observed}|${valuesOf(v)}`; };
+  const items = o.verdicts.filter(x => x.class === 'needs_triage' || x.class === 'mismatch');
+  // 값을 읽어 비교한 불일치를 먼저, 그다음 검사 실패, 행동·시작 실패 순. 같은 순위에서는 원본을 복제본보다 먼저 분류해 공유할 수 있게 한다.
+  const rank = (v: Verdict) => (v.observed === 'mismatch' ? 0 : v.kind === 'check' ? 1 : 2) * 2 + (scenarioOf.get(v.scenario)?.variantOf ? 1 : 0);
+  items.sort((a, b) => rank(a) - rank(b));
+  // 한도는 분류할 항목 수에 맞춘다(최소 20, 최대 60). 비용은 예산 장부가 따로 막는다.
+  const limit = o.maxItems ?? Math.min(60, Math.max(20, new Set(items.map(keyOf)).size));
+  // 같은 검사끼리 묶어 묶음마다 맨 앞 항목(원본 우선)만 분류하고, 나머지는 그 결과를 공유한다. 한도는 묶음 수 기준이다.
+  const groups = new Map<string, Verdict[]>();
+  for (const v of items) groups.has(keyOf(v)) ? groups.get(keyOf(v))!.push(v) : groups.set(keyOf(v), [v]);
+  const heads = [...groups.values()];
+  for (const g of heads.slice(limit)) for (const v of g) unclassified(v, '분류 항목 수 한도 초과');
+  // 묶음끼리는 서로 독립이라 동시에 concurrency개씩 분류한다. 비용은 같은 예산 장부가 호출마다 예약해 막는다.
+  const queue = heads.slice(0, limit).map(g => g[0]);
+  await Promise.all(Array.from({ length: Math.max(1, o.concurrency ?? 1) }, async () => {
+    for (let v = queue.shift(); v; v = queue.shift()) await classifyOne(v);
+  }));
+  for (const [head, ...rest] of heads.slice(0, limit)) for (const v of rest) {
+    if (head.triage && 'reason' in head.triage) {
+      v.class = head.class;
+      v.triage = { reason: `(같은 검사 ${head.id}의 분류를 공유) ${head.triage.reason}`, quotes: head.triage.quotes };
+      v.triageSharedFrom = head.id;
+      v.triageLog = head.triageLog;
+    } else unclassified(v, '같은 검사의 앞선 분류가 끝나지 않아 다시 하지 않음');
+  }
+  if (heads.length) o.onUpdate?.();
+
+  async function classifyOne(v: Verdict) {
+    const s = o.plan.scenarios.find(x => x.id === v.scenario)!;
+    const r = o.run.scenarios.find(x => x.id === v.scenario)!;
+    const { files, own, image } = evidenceFor(o.run.runDir, v, r, o.plan);
+    let allowWrites = false;
+    try { allowWrites = !!JSON.parse(readFileSync(join(o.run.runDir, 'policy.json'), 'utf8')).allowWrites; } catch { /* 예전 실행 폴더 */ }
+    let accepted: { class: Class; reason: string; quotes: Quote[] } | undefined;
+    const classify: Tool = {
+      def: { name: 'classify', description: '실패 한 건의 분류와 근거 인용을 제출한다.', strict: true, input_schema: {
+        type: 'object', additionalProperties: false, required: ['class', 'reason', 'quotes'],
+        properties: {
+          class: { enum: ['app_defect_candidate', 'automation_failure', 'uncertain'] },
+          reason: { type: 'string' },
+          quotes: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['file', 'text'],
+            properties: { file: { type: 'string' }, text: { type: 'string' } } } },
+        } } },
+      run: async (input: { class: Class; reason: string; quotes: Quote[] }) => {
+        const errors = checkQuotes(input, files, own);
+        if (errors.length) return { text: `고쳐서 다시 제출하세요:\n- ${errors.join('\n- ')}`, isError: true };
+        accepted = { class: input.class, reason: input.reason, quotes: input.quotes };
+        return { text: '받았습니다.', done: true };
+      },
+    };
+    const result = await runAgent({ send: o.send, model: o.model, system: o.system ?? SYSTEM, tools: [classify],
+      user: image ? [{ type: 'text', text: `${triageMessage(o.plan, s, v, files, r, allowWrites)}
+첨부 이미지: ${image} (실패 시점 화면. 이미지에서 본 것은 reason에 적고, 인용은 텍스트 증거 파일에서만 한다)` },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: readFileSync(join(o.run.runDir, image)).toString('base64') } }]
+        : triageMessage(o.plan, s, v, files, r, allowWrites), budget: o.budget, maxTurns: 3, maxTokens: 8000, nudge: true });
+    mkdirSync(join(o.run.runDir, logDir), { recursive: true });
+    v.triageLog = `${logDir}/${v.id}.json`;
+    writeFileSync(join(o.run.runDir, v.triageLog), privateJson({ stop: result.stop, detail: result.detail, turns: result.turns }, 2));
+    if (accepted) {
+      v.class = accepted.class;
+      v.triage = { reason: accepted.reason, quotes: accepted.quotes };
+    } else {
+      unclassified(v, `분류 미완료: ${result.stop}${result.detail ? ` (${result.detail})` : ''}`);
+    }
+    o.onUpdate?.();
+  }
+}
+
+/**
+ * 이 항목에 쓸 수 있는 증거: 실패 시점 snapshot(own), 같은 시나리오의 시작 snapshot, 그리고 관련 행동의 직전·직후 snapshot
+ * (검사면 그 검사 직전 행동, 행동이면 그 행동의 직전). 다른 시나리오의 증거는 주지 않는다.
+ */
+function evidenceFor(runDir: string, v: Verdict, r: ScenarioResult, plan: Plan): { files: Map<string, string>; own: Set<string>; image?: string } {
+  const step = v.kind === 'act' ? r.steps.find(x => x.id === v.id) : undefined;
+  const ownAll = v.kind === 'start' ? r.startEvidence ?? []
+    : v.kind === 'act' ? (step?.evidence ?? []).filter(p => !p.includes('.before.'))
+    : r.checks.find(x => x.id === v.id)?.evidence ?? [];
+  const ownPaths = ownAll.filter(p => p.endsWith('.txt'));
+  // 실패 시점 화면 한 장. 접근성 텍스트에는 가림·겹침·잘림이 드러나지 않는다. 비밀번호 칸은 촬영 때 가렸다.
+  const image = ownAll.find(p => p.endsWith('.png') && existsSync(join(runDir, p)));
+  const after = v.kind === 'check' ? plan.scenarios.flatMap(s => s.checks).find(c => c.id === v.id)?.after : undefined;
+  const actionPaths = v.kind === 'act' ? step?.before ?? (step?.evidence ?? []).filter(p => p.includes('.before.'))
+    : after && after !== 'start' ? r.steps.find(x => x.id === after)?.evidence ?? [] : [];
+  const paths = [...new Set([...ownPaths, ...(r.startEvidence ?? []), ...actionPaths])].filter(p => p.endsWith('.txt') && existsSync(join(runDir, p)));
+  return { files: new Map(paths.map(p => [p, readFileSync(join(runDir, p), 'utf8')])), own: new Set(ownPaths.filter(p => paths.includes(p))), ...(image ? { image } : {}) };
+}
+
+/**
+ * 실패 항목까지의 행동 기록(최근 10개). 검사면 그 검사 직전 행동까지, 행동이면 그 행동까지.
+ * fill의 입력 원문은 넘기지 않는다(비밀번호·토큰일 수 있다). 길이만 준다.
+ */
+export function actionsUpTo(s: Plan['scenarios'][number], v: Verdict, r: ScenarioResult, targets: Plan['targets'] = {}) {
+  const last = v.kind === 'act' ? v.id : v.kind === 'check' ? s.checks.find(c => c.id === v.id)?.after : 'start';
+  const upTo = last === 'start' ? 0 : s.steps.findIndex(st => st.id === last) + 1;
+  return s.steps.slice(0, upTo).slice(-10).map(st => {
+    const res = r.steps.find(x => x.id === st.id);
+    const value = st.value === undefined ? {} : st.op === 'fill' ? { valueLength: st.value.length } : { value: st.value };
+    // 계획된 대상 설명. 이름 없는 아이콘 버튼은 접근성 표현만으로 어느 버튼인지 모르므로, 라벨 영역·순서(anchor·nth·of)로 무엇을 눌렀는지 알린다.
+    const target = st.target ? targets[st.target]?.target : undefined;
+    return { id: st.id, op: st.op, ...value, ...(target ? { target } : {}), status: res?.status ?? 'not_run',
+      pressed: res?.pressed ?? null, urlBefore: res?.urlBefore ?? null, urlAfter: res?.url ?? null };
+  });
+}
+
+export function checkQuotes(input: { class: string; quotes: Quote[] }, files: Map<string, string>, own: Set<string>): string[] {
+  const errors: string[] = [];
+  if (input.class !== 'uncertain' && !input.quotes.length) errors.push('uncertain이 아니면 근거 인용이 하나 이상 필요하다');
+  if (input.class !== 'uncertain' && own.size && !input.quotes.some(q => own.has(q.file))) {
+    errors.push(`실패 시점 증거(${[...own].join(', ')})에서 하나 이상 인용해야 한다`);
+  }
+  for (const q of input.quotes) {
+    const text = files.get(q.file);
+    if (text === undefined) errors.push(`제공되지 않은 파일: ${q.file}`);
+    else if (q.text.replace(/\s/g, '').length < MIN_QUOTE || !text.includes(q.text)) {
+      errors.push(`${q.file}에 그대로 있는 원문이어야 하고 공백 제외 ${MIN_QUOTE}자 이상이어야 함: ${JSON.stringify(q.text)}`);
+    }
+  }
+  return errors;
+}
+
+/** 같은 종류·내용·경로(쿼리 제외)의 신호는 한 항목으로 묶고 어느 시나리오·단계에서 났는지만 모은다. 복제 시나리오의 반복 발견을 새 항목으로 세지 않는다. */
+export function groupSignals(scenarios: ScenarioResult[]): Judgment['errorSignals'] {
+  const out = new Map<string, Judgment['errorSignals'][number]>();
+  for (const r of scenarios) for (const g of r.signals ?? []) {
+    const path = (() => { try { const u = new URL(g.url); return u.origin + u.pathname + hashRoute(u).split('?')[0]; } catch { return g.url; } })();
+    const key = JSON.stringify([g.kind, g.status ?? null, g.text, path]);
+    if (!out.has(key)) out.set(key, { kind: g.kind, text: g.text, path, ...(g.status ? { status: g.status } : {}), ...(g.normal ? { normal: true as const } : {}), at: [] });
+    out.get(key)!.at.push({ scenario: r.id, after: g.after });
+  }
+  return [...out.values()];
+}
+
+function triageMessage(plan: Plan, s: Plan['scenarios'][number], v: Verdict, files: Map<string, string>, r: ScenarioResult, allowWrites = false): string {
+  const item = v.kind === 'start' ? { start: s.start }
+    : v.kind === 'act' ? s.steps.find(x => x.id === v.id)
+    : s.checks.find(x => x.id === v.id);
+  const targetId = (item as { target?: string } | undefined)?.target;
+  // 검사는 기대·실제·읽기 방식·시점을 필드로 넘긴다. 문장 요약만 주면 읽기 방식 차이 같은 자동화 원인을 가리기 어렵다.
+  const c = v.kind === 'check' ? s.checks.find(x => x.id === v.id)! : undefined;
+  const res = c ? r.checks.find(x => x.id === c.id) : undefined;
+  // 관측 참조면 expected는 참조한 검사가 실제로 읽은 값이고, 무엇을 참조했는지(expectedFrom)도 함께 넘긴다.
+  const comparison = c && res ? { read: c.read, op: c.op, expected: res.expected ?? null, ...(c.expected_from ? { expectedFrom: c.expected_from } : {}),
+    actual: res.actual ?? null, matchedElements: res.count ?? null, after: c.after, expectationBasis: c.source.kind,
+    reads: res.reads ?? null, waitedMs: res.waitedMs ?? null, ...(res.first ? { firstRead: res.first } : {}),
+    ...(res.reason ? { reason: res.reason } : {}), evidenceFiles: res.evidence ?? [] } : undefined;
+  return [
+    '요구사항:', ...plan.requirements.filter(q => s.covers.includes(q.id)).map(q => `- ${q.id}: ${q.text}`),
+    `시나리오 ${s.id}: ${s.title}`,
+    `실패한 항목 ${v.id}: ${JSON.stringify(item)}`,
+    ...(targetId ? [`대상 ${targetId}: ${JSON.stringify(plan.targets[targetId])} (탐색 때 유일하게 찾은 요소)`] : []),
+    `실행 기록: ${v.observed}`,
+    `시작 화면: ${r.ready === false ? '기한 안에 멈추지 않음(로딩 중일 수 있음)' : '멈춘 뒤 기록'}, 선행조건 ${r.precondition}`,
+    ...(comparison ? [`비교 기록: ${JSON.stringify(comparison)}`] : []),
+    // 이 항목까지 실제로 한 행동: 누른 요소의 접근성 표현·화면 위치, 행동 전후 URL. 자동화가 다른 것을 눌렀는지 가르는 근거다.
+    `행동 기록: ${JSON.stringify(actionsUpTo(s, v, r, plan.targets))}`,
+    // 일반 규칙 근거면 규칙 본문·적용 조건·정상 예외를 함께 준다. 예외에 해당하면 결함이 아니다.
+    ...(ruleOf(c?.source.rule) ? [`일반 규칙 ${c!.source.rule}: ${JSON.stringify(ruleOf(c!.source.rule))}`] : []),
+    ...(v.error ? [`오류 원문: ${v.error}`] : []),
+    // 증거가 빠진 이유를 알려 준다. 빠진 증거를 근거로 추측하지 않게 한다.
+    ...(() => {
+      const prev = c && c.after !== 'start' ? r.steps.find(x => x.id === c.after)?.captureErrors ?? [] : [];
+      const all = [...(r.startCaptureErrors ?? []).map(e => `시작 ${e}`), ...prev.map(e => `${c!.after} ${e}`), ...(v.captureErrors ?? [])];
+      return all.length ? [`증거 수집 실패(이 증거는 없음): ${all.join('; ')}`] : [];
+    })(),
+    // 우리가 막은 쓰기 요청. 실패가 그 요청의 결과(저장·전송)에 기대면 앱이 아니라 차단 때문일 수 있다.
+    // 쓰기 정책을 늘 밝힌다. 밝히지 않으면 쓰기를 허용한 실행에서도 "정책이 막았을 수 있다"며 판단을 미룬다(email 11/8 S8).
+    allowWrites ? `쓰기 정책: 허용(이 실행은 앱의 쓰기 요청을 막지 않았다). 서버로 간 같은 origin 쓰기 요청과 응답 (after = 요청이 나간 단계): ${JSON.stringify((r.writes ?? []).slice(0, 10))}`
+      : '쓰기 정책: 차단(이 실행은 앱의 POST 등 쓰기 요청을 막는다).',
+    ...(r.writeBlocked?.length ? [`이 시나리오에서 테스트 정책이 막은 앱의 쓰기 요청 (after = 요청이 나간 단계): ${JSON.stringify(r.writeBlocked.slice(0, 10))}`] : []),
+    // 우리가 막은 다른 서버 요청(스크립트·fetch 등). 화면이 덜 그려지거나 기능이 비면 앱이 아니라 차단 때문일 수 있다.
+    ...(blockedSummary(r.blocked, [new URL(s.start.url).origin]) ? [`이 시나리오에서 테스트 정책이 막은 다른 서버 요청(origin별 건수): ${blockedSummary(r.blocked, [new URL(s.start.url).origin])}`] : []),
+    ...(r.newTabs?.length ? [`이 시나리오에서 새 탭이 열림(검사는 원래 탭을 읽음): ${JSON.stringify(r.newTabs)}`] : []),
+    // 기대값 없이 잡힌 신호. 행동 직후의 스크립트 예외·서버 오류는 "앱이 반응하지 않았다"를 뒷받침할 수 있다.
+    ...(r.signals?.length ? [`이 시나리오의 콘솔·요청 오류 (after = 그 신호가 난 단계${r.signals.length > 20 || r.signalsDropped ? `, 일부만 보임: 전체 ${r.signals.length + (r.signalsDropped ?? 0)}개 중 앞 20개` : ''}): ${JSON.stringify(r.signals.slice(0, 20))}`] : []),
+    '증거 파일 (*.start는 시작 직후, *.before·*.after는 그 행동의 직전·직후, 나머지는 실패 시점):',
+    ...[...files].map(([name, text]) => `--- ${name}\n${text.length > EVIDENCE_CHARS ? `${text.slice(0, EVIDENCE_CHARS)}\n(이후 생략: 생략된 부분 없이 판단할 수 없으면 uncertain)` : text}`),
+  ].join('\n');
+}
+
+/**
+ * 결함 후보(원래 불일치이거나 AI가 결함 후보로 본 항목)의 시나리오를 최초 실행 폴더에 고정된 plan·정책으로 한 번 재실행한다.
+ * 실행 코드가 최초와 다르거나, 재실행이 무효이거나, 재실행에서 선행조건(시작 조건)이 통과하지 못하면 reproduction_inconclusive.
+ * 화면 전체 지문은 쓰지 않는다: 목록 순서·추천처럼 매번 바뀌는 영역 때문에 같은 시작 상태도 다르게 보인다.
+ * 선행조건이 없는 시나리오는 시작 URL만 같다는 뜻이므로 결과에 그렇게 적는다.
+ */
+export async function reproduce(o: { run: RunResult; verdicts: Verdict[]; runDir: string; timeoutMs?: number; storageState?: StorageState; hideEnv?: string[];
+  /** 등록된 초기화(reset.ts). 쓰기 허용 실행에서만 재실행 전에 호출하고 확인한다 */
+  reset?: () => Promise<ResetResult>;
+  /** 최초 실행 전 초기화 결과. 실패했으면 최초 시작 상태를 모르므로 재현을 판단하지 않는다 */
+  startReset?: ResetResult }): Promise<RunResult | undefined> {
+  // 원래 불일치는 AI 분류 결과와 상관없이 재현한다. 자동화 문제로 분류돼도 재현 여부는 별도 정보다.
+  const candidates = o.verdicts.filter(isCandidate);
+  if (!candidates.length) return undefined;
+  const plan: Plan = JSON.parse(readFileSync(join(o.run.runDir, 'plan.json'), 'utf8'));
+  const policy: Policy = JSON.parse(readFileSync(join(o.run.runDir, 'policy.json'), 'utf8'));
+  const firstManifest = JSON.parse(readFileSync(join(o.run.runDir, 'manifest.json'), 'utf8'));
+  const allInconclusive = (reason: ReproReason, detail: string) => { for (const v of candidates) { v.reproduction = 'reproduction_inconclusive'; v.reproductionReason = reason; v.reproductionDetail = detail; } };
+  // 쓰기를 허용한 실행은 앞 시나리오가 서버 상태를 바꿨을 수 있다. 등록된 초기화 없이 다시 돌리면 같은 시작이라고 할 수 없다.
+  // 쓰기를 막은 실행은 우리가 서버 상태를 바꾸지 않으므로 초기화 없이 같은 시작 URL에서 재실행한다.
+  // 예외: 기대값이 같은 시나리오 안에서 앞서 읽은 값(expected_from)인 검사는 앞뒤 비교라 서버에 쌓인 데이터에 기대지 않는다
+  // (틀린 주소를 넣고 보낸 뒤 입력칸이 그대로인가 등). 이런 검사만 초기화 없이 다시 돌리고, 판정은 확신 중간까지만 준다.
+  let pending = candidates;
+  if (policy.allowWrites && !o.reset) {
+    const checks = new Map(plan.scenarios.flatMap(s => s.checks.map(c => [c.id, { c, scenario: s.id }] as const)));
+    const stateFree = (v: Verdict) => {
+      const x = v.kind === 'check' && !v.visual ? checks.get(v.id) : undefined;
+      return !!x?.c.expected_from && checks.get(x.c.expected_from)?.scenario === x.scenario;
+    };
+    for (const v of candidates.filter(v => !stateFree(v))) { v.reproduction = 'reproduction_inconclusive'; v.reproductionReason = 'reset_unavailable'; v.reproductionDetail = '쓰기 허용 실행인데 등록된 초기화가 없음'; }
+    pending = candidates.filter(stateFree);
+    if (!pending.length) return undefined;
+    for (const v of pending) v.reproducedWithoutReset = true;
+  }
+  if (policy.allowWrites && o.startReset && !o.startReset.ok) { allInconclusive('reset_failed', `실행 전 초기화 실패(최초 시작 상태 미확인): ${o.startReset.reason}`); return undefined; }
+  // 같은 폴더로 다시 판정하면 재실행이 거부된다. 초기화를 부르기 전에 확인해 상태만 바꾸고 끝나는 일을 막는다.
+  if (existsSync(o.runDir)) throw new Error(`재현 폴더가 이미 있음: ${o.runDir}`);
+  // 쓰기를 막은 실행은 서버 상태를 바꾸지 않으므로 등록된 초기화도 부르지 않는다(초기화 자체가 쓰기다).
+  let state = o.storageState;
+  if (policy.allowWrites && o.reset) {
+    const r = await o.reset();
+    if (!r.ok) { allInconclusive('reset_failed', r.reason); return undefined; }
+    state = r.storageState ?? state;
+  }
+  const again = await runPlan({ plan, policy, runDir: o.runDir, timeoutMs: o.timeoutMs ?? firstManifest.timeoutMs,
+    only: [...new Set(pending.map(v => v.scenario))], workers: firstManifest.workers, storageState: state, hideEnv: o.hideEnv });
+  const secondManifest = JSON.parse(readFileSync(join(o.runDir, 'manifest.json'), 'utf8'));
+  const changed = Object.keys(firstManifest.files).filter(k => k.startsWith('src/') && firstManifest.files[k] !== secondManifest.files[k]);
+  for (const v of pending) {
+    const first = o.run.scenarios.find(x => x.id === v.scenario)!;
+    const second = again.scenarios.find(x => x.id === v.scenario)!;
+    const inconclusive = (reason: ReproReason, detail: string) => { v.reproduction = 'reproduction_inconclusive'; v.reproductionReason = reason; v.reproductionDetail = detail; };
+    if (changed.length) { inconclusive('code_changed', `실행 코드가 최초와 다름: ${changed.join(', ')}`); continue; }
+    if (!!firstManifest.loggedIn !== !!secondManifest.loggedIn) { inconclusive('login_differs', `로그인 상태가 최초와 다름(최초 ${firstManifest.loggedIn ? '로그인' : '로그인 안 함'}, 재실행 ${secondManifest.loggedIn ? '로그인' : '로그인 안 함'})`); continue; }
+    if (!second.valid) { inconclusive('execution_incomplete', `재실행 무효: ${second.invalid.join('; ')}`); continue; }
+    if (second.precondition === 'failed') { inconclusive('start_differs', '재실행에서 선행조건(시작 조건)이 통과하지 못함'); continue; }
+    // 시각 검사는 촬영 상태만 같으므로 서명으로 비교하지 않는다. 같은 위반이 다시 보이는지는 replayVisual이 이미지로 판단한다.
+    if (v.visual) continue;
+    const relative = plan.scenarios.flatMap(s => s.checks).find(c => c.id === v.id)?.expected_from !== undefined;
+    const before = signature(first, v, relative);
+    const after = signature(second, v, relative);
+    if (after === before) {
+      v.reproduction = 'reproduced';
+      const c2 = second.checks.find(x => x.id === v.id);
+      v.reproductionDetail = [second.precondition === 'none' ? '시작 조건 미선언(URL만 확인)' : '',
+        relative && c2 ? `관측 참조 재실행: 기대 ${JSON.stringify(c2.expected ?? null)}, 실제 ${JSON.stringify(c2.actual ?? null)}` : ''].filter(Boolean).join('; ') || undefined;
+    }
+    else if (after === 'passed' || after === 'ok') { v.reproduction = 'flaky'; v.reproductionDetail = `재실행 결과: ${after}`; }
+    // 값을 제대로 읽었는데 다른 불일치면 결과가 달라진 것이고, 읽지 못했으면 실행·읽기가 끝나지 않은 것이다.
+    else if (v.kind === 'check' && second.checks.find(x => x.id === v.id)?.status === 'mismatch') inconclusive('result_differs', `재실행 결과가 최초와 다름: ${after}`);
+    else inconclusive('execution_incomplete', `재실행에서 값을 읽지 못하거나 실행이 끝나지 않음: ${after}`);
+  }
+  return again;
+}
+
+/**
+ * 시스템 판정. 실행·분류·재현이 끝나지 않은 항목은 판정하지 않고(incomplete) 사유를 남긴다. 끝난 항목은 반드시 판정한다.
+ * 확신 높음은 명시 근거(요구사항·화면 제약) 위반이 재현되고 AI 분류가 자동화 실패가 아님을 보였을 때만이다.
+ * 일반 규칙(inferred) 위반은 Q22 팀 확인 전까지 최대 확신 중간이다.
+ * shortcut: 업무 규칙 질문에 걸린 판단 보류와 UI 결함·개선 제안은 아직 없다. 질문은 plan.questions로 따로 보고한다.
+ */
+export function systemVerdict(plan: Plan, v: Verdict): NonNullable<Verdict['system']> {
+  const incomplete = (reason: string) => ({ level: 'incomplete' as const, reason });
+  if (v.class === 'passed' || v.class === 'passed_inferred' || v.class === 'passed_observed') return { level: 'not_bug', reason: '검사 통과' };
+  if (v.class === 'passed_visual') return { level: 'not_bug', reason: '시각 검사의 모든 조건 충족' };
+  if (v.class === 'needs_visual') return incomplete('시각 판정 미완료');
+  // 시각 위반은 기계 비교가 아니라 AI 판정이라 버그 등급을 주지 않는다. 같은 위반이 재현 화면에서도 보였을 때만 UI 결함·개선 제안이다.
+  if (v.class === 'app_defect_candidate' && v.visual?.assessment) {
+    if (v.reproduction === 'flaky') return { level: 'hold', reason: `시각 위반이 재현 화면에서 보이지 않음${v.reproductionDetail ? `: ${v.reproductionDetail}` : ''}` };
+    if (v.reproduction !== 'reproduced') return incomplete(`시각 위반 재현 판단 불가${v.reproductionDetail ? `: ${v.reproductionDetail}` : ''}`);
+    const basis = v.source === 'requirement' ? '요구사항' : v.source === 'constraint' ? '화면 안내' : `일반 규칙 ${plan.scenarios.flatMap(s => s.checks).find(c => c.id === v.id)?.source.rule ?? '?'}`;
+    return v.visual.assessment.blocks_use
+      ? { level: 'ui_defect', reason: `${basis} 근거 시각 위반(${v.visual.decision}), 정보 확인·조작을 막음, 재현됨` }
+      : { level: 'improvement', reason: `${basis} 근거 시각 위반(${v.visual.decision}), 조작은 막지 않음, 재현됨` };
+  }
+  if (v.class === 'automation_failure') return { level: 'not_bug', reason: '자동화 실패로 분류(원래 결과는 보존)' };
+  if (v.class === 'not_applicable') return { level: 'hold', reason: '같은 템플릿 다른 페이지에서 이름으로 고정한 대상이 없음: 페이지마다 다른 이름인지 요소 누락인지 사람이 확인' };
+  if (v.class !== 'app_defect_candidate') return incomplete(({ invalid: '무효 시나리오', not_run: `실행 안 됨(원인 ${v.cause ?? '알 수 없음'})`,
+    uncertain_execution: '실행 여부 불명확', precondition_failed: '시작 조건 준비 실패', policy_blocked: '앱 설정이 금지한 행동이라 실행하지 않음', write_blocked: '쓰기 차단으로 확인 불가', uncertain: 'AI 분류가 판단 불가',
+    mismatch: '분류 미완료', needs_triage: '분류 미완료', environment_failure: `실행 환경 네트워크 끊김(${v.error ?? '?'})` } as Partial<Record<Class, string>>)[v.class] ?? v.class);
+  // AI가 결함 후보로 봤어도 실패 시점 snapshot을 못 남겼으면 그 분류를 실패 시점 증거로 확인할 수 없다(Q66). 원래 불일치는 남는다.
+  if (v.captureErrors?.some(e => e.startsWith('aria')) && v.triage && 'reason' in v.triage) return incomplete(`증거 부족: 실패 시점 증거 수집 실패(${v.captureErrors.join('; ')})`);
+  // 값을 읽어 비교한 불일치만 판정한다. 대상 미해결·오류는 같은 실패가 재현돼도 결함 근거가 아니다.
+  if (v.kind === 'check' && v.observed !== 'mismatch') return incomplete(`실제 값을 읽지 못함(${v.observed})`);
+  if (v.reproduction === 'flaky') return { level: 'hold', reason: `재실행에서 재현 안 됨${v.reproductionDetail ? `: ${v.reproductionDetail}` : ''}` };
+  if (v.reproduction !== 'reproduced') return incomplete(`재현 판단 불가${v.reproductionDetail ? `: ${v.reproductionDetail}` : ''}`);
+  if (v.reproducedWithoutReset && v.source !== 'observed') return { level: 'bug_medium',
+    reason: `${v.source === 'requirement' ? '요구사항' : v.source === 'constraint' ? '화면 제약 문구' : `일반 규칙 ${plan.scenarios.flatMap(s => s.checks).find(c => c.id === v.id)?.source.rule ?? '?'}`} 근거 위반, 초기화 없이 같은 시나리오 안 앞뒤 비교로 재현됨 (서버 상태가 달랐을 수 있어 확신 중간 상한)` };
+  if (v.source === 'requirement') return { level: 'bug_high', reason: '요구사항 위반, 재현됨, 증거 인용으로 자동화 실패 아님' };
+  // 화면 제약 인용이 이 기대값을 실제로 뒷받침하는지는 기계적으로 확인할 수 없다. 그래서 확신 중간까지만 준다(2026-10-16).
+  if (v.source === 'constraint') return { level: 'bug_medium', reason: '화면 제약 문구 근거 위반, 재현됨 (인용과 기대의 관계는 사람이 확인)' };
+  if (v.source === 'observed') return incomplete('탐색 때 본 값과 시작 상태가 다름(결함 근거 아님)');
+  // 행동 실패(대상 사라짐 등)는 규칙 근거가 없다. 앱 변경인지 결함인지 사람이 볼 항목으로 둔다.
+  if (v.kind !== 'check') return { level: 'hold', reason: `행동 실패가 재현됨(${v.observed}). 의도된 변경인지 근거 없음` };
+  const c = plan.scenarios.flatMap(s => s.checks).find(x => x.id === v.id);
+  // 결정적 관계 규칙: 화면에서 읽은 두 값을 하네스가 비교했다. AI는 규칙을 골랐을 뿐 판정은 값 비교가 정했다(Q22 제한 승인).
+  // 같은 값 비교(equals·same_number)이고, 참조한 값이 다른 대상이거나 다른 시점에서 읽힌 경우에만 관계 비교로 인정한다(같은 요소 별칭 재비교 방지).
+  const ref = c?.expected_from ? plan.scenarios.flatMap(s => s.checks).find(x => x.id === c.expected_from) : undefined;
+  const relation = !!ref && (c!.op === 'equals' || c!.op === 'same_number')
+    && (ref.after !== c!.after || JSON.stringify(plan.targets[ref.target ?? '']?.target) !== JSON.stringify(plan.targets[c!.target ?? '']?.target));
+  if (ruleOf(c?.source.rule)?.deterministic && relation) return { level: 'bug_high', reason: `결정적 관계 비교(규칙 ${c!.source.rule}) 위반, 재현됨` };
+  // 품질·사용성 묶음(3)의 계산 규칙(철자)은 기능 결함이 아니라 화면 결함이다.
+  if (ruleOf(c?.source.rule)?.group === 3) return { level: 'ui_defect', reason: `일반 규칙 ${c!.source.rule}(품질·사용성) 위반, 재현됨` };
+  return { level: 'bug_medium', reason: `일반 규칙 ${c?.source.rule ?? '?'} 위반, 재현됨 (일반 규칙 상한)` };
+}
+
+// 쓰기 차단 항목은 같은 정책으로 다시 돌려도 판정할 수 없어 재현하지 않는다(쓰기 허용 실행에서 다시 확인한다).
+const isCandidate = (v: Verdict) => v.class !== 'write_blocked' && (v.observed === 'mismatch' || v.class === 'app_defect_candidate');
+
+/** 같은 결과인지 비교하는 서명. 오류 문구의 숫자(시간 등)는 지우고 비교한다. */
+function signature(r: ScenarioResult, v: Verdict, relative = false): string {
+  const err = (e?: string) => (e ?? '').replace(/\d+/g, '#');
+  if (v.kind === 'check') {
+    const c = r.checks.find(x => x.id === v.id)!;
+    // 관측 참조 검사는 참조한 값(예: 바뀌는 추천 카드 이름)이 회차마다 달라도 같은 규칙이 다시 깨지면 같은 결과다. 값은 detail에 남긴다.
+    if (relative) return c.status === 'passed' ? 'passed' : `${c.status}|${c.count ?? ''}|${err(c.error)}`;
+    return c.status === 'passed' ? 'passed' : `${c.status}|${c.actual ?? ''}|${c.count ?? ''}|${err(c.error)}`;
+  }
+  if (v.kind === 'act') {
+    const st = r.steps.find(x => x.id === v.id)!;
+    return st.status === 'ok' ? 'ok' : `${st.status}|${st.reason ?? ''}|${st.count ?? ''}|${err(st.error)}`;
+  }
+  return r.start;
+}
+
+export type Judgment = { file: string; verdicts: Verdict[]; requirements: { id: string; plan: string; classes: Partial<Record<Class, number>> }[];
+  /** 시스템 판정 집계. 요구사항 검사 · 자율 검사 · 준비 확인(선행조건)을 나눈다 */
+  system: Record<'requirement' | 'autonomous' | 'preparation' | 'variant', Partial<Record<SystemLevel, number>>>;
+  /** C4 복제 기록(만든 복제, 뺀 검사, 복제하지 않은 사유) */
+  variants: NonNullable<Plan['variants']>;
+  /** 기능(F#)별 계획 여부와 판정 집계(준비 확인 제외), 걸린 질문 */
+  features: { id: string; plan: 'planned' | 'unplanned' | 'missing'; system: Partial<Record<SystemLevel, number>>; questions: string[] }[];
+  /** 답을 받지 못한 업무 규칙 질문. 관련 기능은 판단 보류 */
+  pendingQuestions: Plan['questions'];
+  /** 이 판정의 재현 실행 폴더 이름(결과 폴더 기준). 다시 판정하면 repro-2 … */
+  reproduceDir?: string;
+  /** 기대값 없이 잡힌 오류 신호를 종류·내용·경로로 묶은 검토 대상(판정 아님). normal은 정상 거절(401·403·422) */
+  errorSignals: { kind: Signal['kind']; text: string; path: string; status?: number; normal?: true; at: { scenario: string; after: string }[] }[];
+};
+
+/**
+ * 1차 분류 → AI 분류 → 재현을 거쳐 판정 파일을 쓴다. 단계마다 바로 저장하고, 이전 판정 파일은 덮어쓰지 않는다 (verdicts.json, verdicts-2.json …).
+ * 요구사항 분모는 대조 결과를 그대로 쓴다.
+ */
+export async function judge(o: { plan: Plan; run: RunResult; send: Send; model: string; budget: Budget;
+  reproduceDir: string; timeoutMs?: number; maxTriageItems?: number; concurrency?: number; storageState?: StorageState; hideEnv?: string[]; reset?: () => Promise<ResetResult>; startReset?: ResetResult }): Promise<Judgment> {
+  let n = 1;
+  while (existsSync(join(o.run.runDir, n === 1 ? 'verdicts.json' : `verdicts-${n}.json`))) n++;
+  const file = join(o.run.runDir, n === 1 ? 'verdicts.json' : `verdicts-${n}.json`);
+  // 판정 회차마다 재현 폴더를 따로 둔다. 보고서는 그 판정이 쓴 재현 폴더의 증거만 연결한다.
+  const reproduceDir = n === 1 ? o.reproduceDir : `${o.reproduceDir}-${n}`;
+  const verdicts = preclassify(o.plan, o.run);
+  const checks = new Map(o.plan.scenarios.flatMap(s => s.checks.map(c => [c.id, c] as const)));
+  const reqIds = new Set(o.plan.requirements.map(r => r.id));
+  const variantIds = new Set(o.plan.scenarios.filter(s => s.variantOf).map(s => s.id));
+  const groupOf = (v: Verdict) => variantIds.has(v.scenario) ? 'variant' as const : checks.get(v.id)?.precondition ? 'preparation' as const
+    : v.requirements.some(r => reqIds.has(r)) ? 'requirement' as const : 'autonomous' as const;
+  const count = (vs: Verdict[]) => { const n: Partial<Record<SystemLevel, number>> = {}; for (const v of vs) if (v.system) n[v.system.level] = (n[v.system.level] ?? 0) + 1; return n; };
+  const judgment = (stage: string): Judgment & { stage: string } => ({ file, stage, verdicts, requirements: o.run.requirements.map(r => {
+    const classes: Partial<Record<Class, number>> = {};
+    for (const v of verdicts) if (v.requirements.includes(r.id)) classes[v.class] = (classes[v.class] ?? 0) + 1;
+    return { id: r.id, plan: r.plan, classes };
+  }),
+  system: { requirement: count(verdicts.filter(v => groupOf(v) === 'requirement')), autonomous: count(verdicts.filter(v => groupOf(v) === 'autonomous')),
+    preparation: count(verdicts.filter(v => groupOf(v) === 'preparation')), variant: count(verdicts.filter(v => groupOf(v) === 'variant')) },
+  variants: o.plan.variants ?? [],
+  // M3 이전에 저장한 계획에는 features·questions가 없다.
+  features: (o.plan.features ?? []).map(f => {
+    const scenarios = new Set(o.plan.scenarios.filter(s => s.covers.includes(f.id)).map(s => s.id));
+    return { id: f.id, plan: scenarios.size ? 'planned' as const : o.plan.unplanned.some(u => u.requirement === f.id) ? 'unplanned' as const : 'missing' as const,
+      system: count(verdicts.filter(v => scenarios.has(v.scenario) && groupOf(v) !== 'preparation')),
+      questions: (o.plan.questions ?? []).filter(q => q.feature === f.id).map(q => q.id) };
+  }),
+  pendingQuestions: o.plan.questions ?? [], errorSignals: groupSignals(o.run.scenarios), reproduceDir: basename(reproduceDir) });
+  const save = (stage: string) => writeFileSync(file, privateJson(judgment(stage), 2));
+  save('preclassified');
+  await triage({ plan: o.plan, run: o.run, verdicts, send: o.send, model: o.model, budget: o.budget, maxItems: o.maxTriageItems,
+    onUpdate: () => save('triage'), logDir: n === 1 ? 'triage' : `triage-${n}`, concurrency: o.concurrency });
+  await judgeVisual({ plan: o.plan, run: o.run, verdicts, send: o.send, model: o.model, budget: o.budget,
+    logDir: n === 1 ? 'triage' : `triage-${n}`, concurrency: o.concurrency, onUpdate: () => save('triage') });
+  save('triaged');
+  try {
+    const again = await reproduce({ run: o.run, verdicts, runDir: reproduceDir, timeoutMs: o.timeoutMs, storageState: o.storageState, hideEnv: o.hideEnv, reset: o.reset, startReset: o.startReset });
+    await replayVisual({ plan: o.plan, first: o.run, again, verdicts, send: o.send, model: o.model, budget: o.budget, logDir: n === 1 ? 'triage' : `triage-${n}` });
+  } catch (e) {
+    for (const v of verdicts) if (isCandidate(v) && !v.reproduction) {
+      v.reproduction = 'reproduction_inconclusive';
+      v.reproductionReason = 'execution_incomplete';
+      v.reproductionDetail = `재실행 실패: ${(e as Error).message.split('\n')[0]}`;
+    }
+  }
+  for (const v of verdicts) v.system = systemVerdict(o.plan, v);
+  save('done');
+  return judgment('done');
+}

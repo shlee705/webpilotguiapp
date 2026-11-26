@@ -2,6 +2,7 @@ export type MessageRole = 'user' | 'assistant';
 export type MessageStatus = 'streaming' | 'complete' | 'error' | 'cancelled';
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 export const DEFAULT_MODEL = 'gpt-6-luna';
+export type ApiProvider = 'openai' | 'anthropic';
 
 export interface TokenUsage {
   inputTokens: number;
@@ -15,12 +16,47 @@ export interface UsageSummary extends TokenUsage {
   untrackedRequests: number;
 }
 
-export interface AiSettings {
+export interface AiProfile {
   model: string;
   keyConfigured: boolean;
   keyHint: string;
   storage: 'encrypted' | 'session';
   usage: UsageSummary;
+}
+
+export interface AiSettings extends AiProfile {
+  provider?: ApiProvider;
+  profiles?: Record<ApiProvider, AiProfile>;
+}
+
+export interface BackendProfile {
+  models: { plan: string; triage: string };
+  keyConfigured: boolean;
+  savedKeyConfigured: boolean;
+  keyHint: string;
+  storage: 'env-file';
+  source: 'environment' | 'file' | 'none';
+}
+
+export interface BackendSettings extends BackendProfile {
+  provider: ApiProvider;
+  profiles: Record<ApiProvider, BackendProfile>;
+}
+
+export interface BackendRunOptions {
+  provider?: ApiProvider;
+  models?: { plan: string; triage: string };
+  budgetUsd?: number;
+  exploreMinutes?: number;
+  maxPages?: number;
+  maxTemplates?: number;
+  turnsPerTemplate?: number;
+  maxTurns?: number;
+  pagesPerTemplate?: number;
+  concurrency?: number;
+  workers?: number;
+  planEffort?: 'low' | 'medium' | 'high';
+  sessions?: 'template' | 'cluster';
 }
 
 export interface AgentStep {
@@ -54,7 +90,9 @@ export interface TourPlan {
   targetUrl: string;
   prompt: string;
   model: string;
-  maxActions: number;
+  provider?: ApiProvider;
+  backendOptions?: BackendRunOptions;
+  backendLoginUrl?: string;
   loginEnabled?: boolean;
   state: 'pending' | 'running' | 'complete' | 'cancelled' | 'error';
 }
@@ -72,9 +110,15 @@ export interface LoginCredentials {
   password: string;
 }
 
-export type ReportResult =
+export interface InspectionStatus {
+  phase: 'starting' | 'mapping' | 'exploring' | 'executing' | 'judging' | 'reporting' | 'complete' | 'incomplete' | 'error' | 'cancelled';
+  url?: string;
+}
+
+export type ReportResult = (
   | { status: 'ready'; id: string; name: 'report.pdf'; size: number; updatedAt: string }
-  | { status: 'missing' | 'error'; message: string };
+  | { status: 'missing' | 'error'; message: string }
+) & { runId?: string; inspectionCompleted?: boolean };
 
 export interface ChatMessage {
   id: string;
@@ -86,12 +130,14 @@ export interface ChatMessage {
   findings?: Finding[];
   browserAction?: BrowserAction;
   model?: string;
+  provider?: ApiProvider;
   usage?: TokenUsage;
-  source?: 'openai' | 'legacy' | 'local';
+  source?: ApiProvider | 'legacy' | 'local';
   captures?: Capture[];
   plan?: TourPlan;
   activity?: AgentActivity;
   report?: ReportResult;
+  inspection?: InspectionStatus;
 }
 
 export interface Conversation {
@@ -111,4 +157,5 @@ export type AgentEvent =
   | { type: 'screenshot'; capture: Capture }
   | ({ type: 'activity' } & AgentActivity)
   | { type: 'report'; report: ReportResult }
+  | ({ type: 'inspection' } & InspectionStatus)
   | { type: 'done' };
