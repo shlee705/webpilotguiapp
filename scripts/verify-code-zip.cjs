@@ -22,15 +22,23 @@ function prohibitedPath(filename, payload = false) {
 function isLfsPointer(prefix, size) {
   return size <= 4096 && /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\n/.test(prefix.toString('ascii'));
 }
-async function digestStream(stream) {
-  const digest = createHash('sha256');
-  let size = 0;
-  let prefix = Buffer.alloc(0);
-  for await (const chunk of stream) {
-    digest.update(chunk); size += chunk.length;
-    if (prefix.length < 512) prefix = Buffer.concat([prefix, chunk.subarray(0, 512 - prefix.length)]);
-  }
-  return { size, sha256: digest.digest('hex'), prefix };
+function digestStream(stream) {
+  // yauzl 2.x exposes fd-slicer's legacy stream for STORED entries. It marks
+  // itself destroyed before emitting end, which can leave modern Node async
+  // iterators pending forever. Its documented data/end API remains reliable.
+  return new Promise((resolve, reject) => {
+    const digest = createHash('sha256');
+    let size = 0;
+    let prefix = Buffer.alloc(0);
+    let ended = false;
+    stream.once('error', reject);
+    stream.once('close', () => { if (!ended) reject(Object.assign(new Error('stream-closed-before-end'), { code: 'stream-closed-before-end' })); });
+    stream.once('end', () => { ended = true; resolve({ size, sha256: digest.digest('hex'), prefix }); });
+    stream.on('data', chunk => {
+      digest.update(chunk); size += chunk.length;
+      if (prefix.length < 512) prefix = Buffer.concat([prefix, chunk.subarray(0, 512 - prefix.length)]);
+    });
+  });
 }
 async function candidateManifest(directory) {
   const files = new Map();
@@ -161,7 +169,12 @@ if (require.main === module) {
   if (process.argv.length !== 4) {
     console.error('Usage: node scripts/verify-code-zip.cjs <candidate-win-unpacked> <github-code.zip>');
     process.exitCode = 1;
-  } else verifyCodeZip(process.argv[2], process.argv[3]).then(result => console.log(JSON.stringify(result)))
-    .catch(error => { console.error(JSON.stringify({ passed: false, failure: /^[a-z0-9-]+$/i.test(error.code || '') ? error.code : 'verification-failed' })); process.exitCode = 1; });
+  } else {
+    // A pending Promise alone does not keep Node alive. Only verified success
+    // may produce exit 0, even if a dependency stops delivering stream events.
+    process.exitCode = 1;
+    verifyCodeZip(process.argv[2], process.argv[3]).then(result => { console.log(JSON.stringify(result)); process.exitCode = 0; })
+      .catch(error => { console.error(JSON.stringify({ passed: false, failure: /^[a-z0-9-]+$/i.test(error.code || '') ? error.code : 'verification-failed' })); });
+  }
 }
 module.exports = { verifyCodeZip, prohibitedPath, isLfsPointer };
