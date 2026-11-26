@@ -73,17 +73,14 @@ async function main() {
       const require = process.getBuiltinModule('module').createRequire(`${app.getAppPath()}/package.json`);
       const fs = require('node:fs');
       const path = require('node:path');
-      const { resolveSourceReport } = require(path.join(app.getAppPath(), 'electron', 'reports.cjs'));
+      const { resolveBackendPaths } = require(path.join(app.getAppPath(), 'electron', 'backend-paths.cjs'));
       const { FIXED_MODELS } = require(path.join(app.getAppPath(), 'electron', 'backend.cjs'));
-      const workspace = path.dirname(path.dirname(resolveSourceReport({ appPath: app.getAppPath(), exePath: app.getPath('exe'), isPackaged: app.isPackaged })));
-      const local = path.join(workspace, 'webtestpilot-backend');
-      const backendRoot = fs.existsSync(path.join(local, 'qa', 'src', 'cli.ts')) ? local : path.join(process.resourcesPath, 'webtestpilot-backend');
-      const runtime = app.isPackaged ? path.join(process.resourcesPath, 'backend-runtime', 'node.exe') : path.join(workspace, 'artifacts', 'backend-runtime', 'node.exe');
+      const { backendRoot, nodePath: runtime } = resolveBackendPaths({ appPath: app.getAppPath(), resourcesPath: process.resourcesPath, isPackaged: app.isPackaged });
       // Existing backend credentials belong to the user. If a backend .env
       // exists, skip every start request; never turn a smoke into a live run.
       const hasBackendEnvFile = fs.existsSync(path.join(backendRoot, '.env'));
       session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_details, callback) => callback({ cancel: true }));
-      return { profile: app.getPath('userData'), packaged: app.isPackaged, backendRoot, runtime, hasBackendEnvFile,
+      return { profile: app.getPath('userData'), packaged: app.isPackaged, resourcesPath: process.resourcesPath, backendRoot, runtime, hasBackendEnvFile,
         backendEntryExists: fs.existsSync(path.join(backendRoot, 'qa', 'src', 'cli.ts')),
         runtimeExists: fs.existsSync(runtime), fixedModels: FIXED_MODELS, version: app.getVersion() };
     });
@@ -93,11 +90,13 @@ async function main() {
     assert.equal(configuration.backendEntryExists, true);
     assert.equal(configuration.runtimeExists, true);
     assert.deepEqual(configuration.fixedModels, { plan: 'claude-opus-5-5', triage: 'claude-sonnet-5-5' });
-    if (packaged) assert.equal(path.basename(path.dirname(configuration.runtime)), 'backend-runtime');
+    if (packaged) {
+      assert.equal(configuration.backendRoot, path.join(configuration.resourcesPath, 'webtestpilot-backend'));
+      assert.equal(configuration.runtime, path.join(configuration.resourcesPath, 'backend-runtime', 'node.exe'));
+    }
     let bundledRuntimeVerified = false;
     if (packaged) {
-      // The app may prefer a local workspace backend while the exe lives under
-      // this project. Independently verify that its portable resources work too.
+      // Exercise the same bundled backend selected by the packaged app.
       const bundled = await desktop.evaluate(({ app }) => {
         const require = process.getBuiltinModule('module').createRequire(`${app.getAppPath()}/package.json`);
         const fs = require('node:fs');

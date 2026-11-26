@@ -4,7 +4,7 @@ URL과 요구사항을 실제 WebTestPilot 백엔드에 전달하고, 백엔드�
 
 ## 시작
 
-1. `release/1.0.3/win-unpacked/WebPilot.exe`를 실행합니다. 배포 폴더 전체가 필요합니다.
+1. GitHub에서 **`1xx` 브랜치 → 초록색 Code → Download ZIP**으로 받습니다. ZIP 전체를 쓰기 가능한 폴더에 압축 해제하고 `release/1.0.3/win-unpacked/WebPilot.exe`를 실행합니다. ZIP 안에서 바로 실행하거나 실행 파일만 옮기지 마세요. Git·Node.js·npm을 별도로 설치할 필요는 없습니다. Windows x64와 화면 표현에 사용할 Microsoft Edge가 필요합니다.
 2. 왼쪽 아래 **QA팀 → 실제 검사 백엔드**에서 GPT 또는 Claude, 계획·탐색 모델, 판정 모델과 백엔드 전용 키를 저장합니다. 예산·시간·페이지 수와 고급 검사 옵션의 기본값도 지정합니다. 이 값은 백엔드 폴더의 `.env`에 기록하며 새 테스트부터 적용됩니다.
 3. **QA팀 → 화면 표현 AI**에서 별도로 **GPT (OpenAI)** 또는 **Claude (Anthropic)**를 선택하고, 그 아래의 **모델 → API 키**를 입력해 저장합니다. 기본값은 GPT-6 Luna이며 Claude의 초기 모델은 Claude Haiku 5.5입니다.
 4. URL과 검사할 내용을 보내고 **테스트 설정 → 설정 바꾸기**에서 실제 백엔드의 제공자·모델·검사 요구사항·예산·탐색 시간·페이지 수를 입력합니다. 고급 설정에서 페이지 종류·턴·동시 실행 수·추론 수준·탐색 묶음 방식을 지정합니다. 화면 표현 모델은 별도 영역에서 설정하며, 동작 횟수 지정 없이 실제 백엔드 진행을 따라갑니다.
@@ -126,8 +126,8 @@ npm run package
 
 `backend:check`는 설치·복사 없이 준비 상태를 확인합니다. `package`는 백엔드 준비와 GUI 빌드 후 `release/1.0.3/win-unpacked/`를 만듭니다. 배포에는 백엔드 소스·프롬프트·검사에 필요한 Playwright·Chromium Headless Shell·Node.js를 포함합니다. GUI에 사용하지 않는 전체 Chromium, QA TypeScript 컴파일러·타입 정의, 중복 UI 패키지는 제외합니다. PDF 뷰어·worker·폰트·CMaps·이미지 디코더와 각 라이브러리의 라이선스 고지는 빌드 결과에 포함하며, Electron 언어 리소스는 한국어와 영어를 유지합니다. `.env`, 실행 로그·결과, 평가 자료, 테스트 fixture, 개발 문서는 배포하지 않습니다. 개발용 MCP의 `--headed` 실행에는 전체 Chromium을 별도로 설치해야 합니다.
 
-GUI 저장소의 배포 브랜치는 `1xx`입니다. `main`은 변경하지 않습니다. Windows 실행 폴더는 Git LFS로 관리하므로 Git LFS 설치 후 `git lfs pull --include="release/1.0.3/**"`로 실제 배포 파일을 받습니다. `WebPilot.exe`만 옮기지 말고 `win-unpacked` 폴더 전체를 함께 사용합니다. 실제 API 키·앱 개인 설정·로그인 세션·실행 기록은 소스와 배포본에서 제외합니다. 원본 WebTestPilot 저장소에는 푸시하지 않습니다.
+GUI 저장소의 배포 브랜치는 `1xx`입니다. `main`과 `1xx-backup`은 변경하지 않습니다. 일반 사용자는 [1xx의 Code ZIP](https://github.com/shlee705/webpilotguiapp/archive/refs/heads/1xx.zip)을 받아 전체 압축 해제하면 됩니다. Windows 실행 폴더는 Git LFS로 관리하며, 저장소의 **Settings → General → Archives → Include Git LFS objects in archives**가 켜져 있어야 ZIP에 실제 실행 파일이 포함됩니다. 과거 배포본은 Git에 보존하고 Code ZIP에서는 제외합니다. Git으로 복제하는 개발자는 Git LFS 설치 후 `git lfs pull --include="release/1.0.3/**"`로 배포 파일을 받습니다. 실제 API 키·앱 개인 설정·로그인 세션·실행 기록은 소스와 배포본에서 제외합니다. 자신의 키는 앱에서 별도로 설정합니다. 원본 WebTestPilot 저장소에는 푸시하지 않습니다.
 
-프로젝트 안에서 실행하면 로컬 `webtestpilot-backend`를 사용합니다. 프로젝트 밖의 배포본은 `resources/webtestpilot-backend`를 사용하므로 별도 환경변수 또는 그 폴더의 `.env`로 백엔드 키를 지정해야 합니다. 키 파일은 배포본에 자동으로 복사하지 않습니다.
+패키징된 `WebPilot.exe`는 소스 코드가 함께 있는 Code ZIP 안에서도 항상 실행 파일 옆의 `resources/webtestpilot-backend`와 동봉된 Node.js를 사용합니다. 백엔드 전용 설정은 이 폴더의 `.env`에 저장합니다. `npm run desktop`으로 개발 실행할 때만 프로젝트의 `webtestpilot-backend`를 사용합니다. 기존 개발용 키 파일은 배포본에 자동으로 복사하지 않습니다.
 
 무료 검증은 로컬 fixture·모의 모델/자식 프로세스로 수행합니다. 실제 OpenAI·Anthropic API나 유료 사이트 검사는 실행하지 않았습니다.

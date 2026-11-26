@@ -1,5 +1,4 @@
 const path = require('node:path');
-const fs = require('node:fs');
 const { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } = require('electron');
 const { openInEdge } = require('./edge.cjs');
 const { createOverlayManager } = require('./overlay.cjs');
@@ -9,7 +8,8 @@ const { createBackendConnectionTest } = require('./backend-connection.cjs');
 const { createAiService } = require('./openai.cjs');
 const { readCapture } = require('./captures.cjs');
 const { installRendererLifecycle } = require('./renderer-lifecycle.cjs');
-const { attachReport, openReport, readReport, createReportStore, resolveSourceReport } = require('./reports.cjs');
+const { attachReport, openReport, readReport, createReportStore } = require('./reports.cjs');
+const { resolveBackendPaths } = require('./backend-paths.cjs');
 const { createBackendRunner } = require('./backend.cjs');
 const { createInspectionAgent } = require('./inspection.cjs');
 
@@ -172,14 +172,11 @@ ipcMain.on('ai:cancel-chat', (event, requestId) => {
 function createWindow() {
   if (!backendRunner) {
     try {
-      const workspace = path.dirname(path.dirname(resolveSourceReport({ appPath: app.getAppPath(), exePath: app.getPath('exe'), isPackaged: app.isPackaged })));
-      const localBackend = path.join(workspace, 'webtestpilot-backend');
-      const backendRoot = fs.existsSync(path.join(localBackend, 'qa', 'src', 'cli.ts')) ? localBackend : path.join(process.resourcesPath, 'webtestpilot-backend');
-      const runtime = app.isPackaged ? path.join(process.resourcesPath, 'backend-runtime', 'node.exe') : path.join(workspace, 'artifacts', 'backend-runtime', 'node.exe');
+      const { backendRoot, nodePath } = resolveBackendPaths({ appPath: app.getAppPath(), resourcesPath: process.resourcesPath, isPackaged: app.isPackaged });
       backendSettings = createBackendSettings({ backendRoot });
       backendConnectionTest = createBackendConnectionTest({ settings: backendSettings });
       backendRunner = createBackendRunner({ backendRoot, runsDirectory: path.join(app.getPath('userData'), 'backend-runs'),
-        getConfiguration: provider => backendSettings.resolveConfig(provider), ...(fs.existsSync(runtime) ? { nodePath: runtime } : {}) });
+        getConfiguration: provider => backendSettings.resolveConfig(provider), nodePath });
       backendStartupError = undefined;
     } catch { backendStartupError = '백엔드 .env 설정을 읽을 수 없습니다. 파일과 접근 권한을 확인해 주세요.'; }
   }
