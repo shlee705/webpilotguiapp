@@ -1,4 +1,4 @@
-import type { BackendRunOptions, BackendSettings, LoginCredentials } from '../types';
+import type { BackendRunDefaults, BackendRunOptions, BackendSettings, LoginCredentials } from '../types';
 
 export const BACKEND_RUN_DEFAULTS = {
   budgetUsd: 10, exploreMinutes: 40, maxPages: 30, maxTemplates: 8,
@@ -51,7 +51,14 @@ export function normalizeBackendOptions(value: unknown = {}): BackendRunOptions 
 }
 
 export function backendOptionsFromSettings(settings?: BackendSettings): BackendRunOptions {
-  return normalizeBackendOptions(settings ? { provider: settings.provider, models: { ...settings.models } } : {});
+  return normalizeBackendOptions(settings ? { ...normalizeBackendDefaults(settings.runDefaults), provider: settings.provider, models: { ...settings.models } } : {});
+}
+
+export function normalizeBackendDefaults(value: unknown = {}): BackendRunDefaults {
+  if (!object(value) || Object.keys(value).some(key => !Object.hasOwn(BACKEND_RUN_DEFAULTS, key))) {
+    throw new Error('백엔드 기본 검사 설정에 허용되지 않은 항목이 있습니다.');
+  }
+  return normalizeBackendOptions(value) as BackendRunDefaults;
 }
 
 function assertNoUrlCredentials(url: URL, credentials?: Partial<LoginCredentials>) {

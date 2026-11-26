@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeBackendLoginUrl, normalizeBackendOptions, backendOptionsFromSettings, BACKEND_RUN_DEFAULTS } from '../src/lib/backend-options';
+import { normalizeBackendLoginUrl, normalizeBackendOptions, normalizeBackendDefaults, backendOptionsFromSettings, BACKEND_RUN_DEFAULTS } from '../src/lib/backend-options';
 
 test('backend options preserve exact per-run limits independently from visual configuration', () => {
   const input = { provider: 'openai', models: { plan: 'gpt-6.2-astra', triage: 'gpt-5.4-mini' }, budgetUsd: 2.5, exploreMinutes: 9,
@@ -25,6 +25,30 @@ test('capturing backend settings keeps only selected provider and models, never 
   assert.deepEqual(options.models, { plan: 'claude-opus-5-5', triage: 'claude-sonnet-5-5' });
   assert.equal(JSON.stringify(options).includes('private'), false);
   assert.equal(JSON.stringify(options).includes('not-allowed'), false);
+});
+
+test('new plans snapshot saved defaults and remain independent of later settings changes', () => {
+  const settings = { provider: 'openai', models: { plan: 'gpt-6.2-sol', triage: 'gpt-6-luna' },
+    runDefaults: { ...BACKEND_RUN_DEFAULTS, budgetUsd: 2.5, maxPages: 12, planEffort: 'high', sessions: 'cluster' } } as any;
+  const first = backendOptionsFromSettings(settings);
+  settings.runDefaults.budgetUsd = 9;
+  settings.models.plan = 'gpt-6.2-astra';
+  const second = backendOptionsFromSettings(settings);
+  assert.equal(first.budgetUsd, 2.5);
+  assert.equal(first.models?.plan, 'gpt-6.2-sol');
+  assert.equal(first.maxPages, 12);
+  assert.equal(first.planEffort, 'high');
+  assert.equal(first.sessions, 'cluster');
+  assert.equal(second.budgetUsd, 9);
+  second.maxPages = 5;
+  assert.equal(settings.runDefaults.maxPages, 12);
+});
+
+test('saved defaults allow only numeric and enum inspection limits with legacy fallback', () => {
+  assert.deepEqual(normalizeBackendDefaults(undefined), BACKEND_RUN_DEFAULTS);
+  for (const value of [{ apiKey: 'private' }, { credentials: {} }, { provider: 'openai' }, { models: {} }, { maxPages: 0 }, { workers: 1.5 }, { budgetUsd: NaN }]) {
+    assert.throws(() => normalizeBackendDefaults(value));
+  }
 });
 
 test('login URL accepts relative same-origin paths and rejects other origins or embedded account values', () => {

@@ -12,7 +12,11 @@ async function nativeFixture(page: Page, keyConfigured = true, pdfSize = { width
     } };
     const copy = () => JSON.parse(JSON.stringify({ ...settings, ...settings.profiles[settings.provider] }));
     const emptyBackend = { keyConfigured: false, savedKeyConfigured: false, keyHint: '', storage: 'env-file', source: 'none' };
-    const backendSettings = { provider: 'anthropic', profiles: {
+    const backendStored = sessionStorage.getItem('native-fixture-backend-settings');
+    const backendSettings = backendStored ? JSON.parse(backendStored) : { provider: 'anthropic', runDefaults: {
+      budgetUsd: 10, exploreMinutes: 40, maxPages: 30, maxTemplates: 8, turnsPerTemplate: 25,
+      maxTurns: 40, pagesPerTemplate: 3, concurrency: 1, workers: 1, planEffort: 'medium', sessions: 'template',
+    }, profiles: {
       openai: { ...emptyBackend, models: { plan: 'gpt-6.2-sol', triage: 'gpt-6-luna' } },
       anthropic: { ...emptyBackend, models: { plan: 'claude-opus-5-5', triage: 'claude-sonnet-5-5' } },
     } };
@@ -55,8 +59,11 @@ async function nativeFixture(page: Page, keyConfigured = true, pdfSize = { width
         backendSettings.provider = options.provider ?? backendSettings.provider;
         const profile = backendSettings.profiles[backendSettings.provider as 'openai' | 'anthropic'];
         if (options.models) profile.models = { ...options.models };
+        if (options.runDefaults) backendSettings.runDefaults = { ...options.runDefaults };
         if (options.apiKey) { profile.savedKeyConfigured = true; profile.keyConfigured = true; profile.keyHint = '••••back'; if (profile.source !== 'environment') profile.source = 'file'; }
         if (options.forgetKey) { profile.savedKeyConfigured = false; profile.keyHint = ''; if (profile.source !== 'environment') { profile.keyConfigured = false; profile.source = 'none'; } }
+        // Persist only public fixture metadata, never supplied API key values.
+        sessionStorage.setItem('native-fixture-backend-settings', JSON.stringify(backendSettings));
         return backendCopy();
       },
       testBackendConnection: async (options: any) => { calls.backendTested.push(options); return { ok: true }; },
@@ -551,8 +558,11 @@ test('visual and backend settings use separate roles, credentials and model requ
   await expect(backendKey).toHaveValue('');
   await expect(backendKey).toHaveAttribute('placeholder', /••••back/);
   await expect(page.locator('.backend-key-status')).toContainText('.env · OPENAI_API_KEY');
-  await expect(page.getByRole('tabpanel')).toContainText('화면 표현 AI 설정은 바뀌지 않습니다.');
-  expect(await page.evaluate(() => (window as any).__native.backendSaved[0])).toEqual(expected);
+  await expect(page.getByRole('tabpanel')).toContainText('새 테스트부터 적용됩니다.');
+  expect(await page.evaluate(() => (window as any).__native.backendSaved[0])).toEqual({ ...expected, runDefaults: {
+    budgetUsd: 10, exploreMinutes: 40, maxPages: 30, maxTemplates: 8, turnsPerTemplate: 25,
+    maxTurns: 40, pagesPerTemplate: 3, concurrency: 1, workers: 1, planEffort: 'medium', sessions: 'template',
+  } });
   expect(await page.evaluate(() => (window as any).__native.saved.length)).toBe(0);
   expect(await page.evaluate(() => (window as any).__native.tested.length)).toBe(0);
   expect(await page.evaluate(() => Object.values(localStorage).join('') + Object.values(sessionStorage).join(''))).not.toContain('sk-backend-openai-only');
@@ -624,9 +634,98 @@ test('backend env-file key removal preserves environment credentials and running
   await page.getByRole('tab', { name: '실제 검사 백엔드', exact: true }).click();
   await expect(page.getByRole('combobox', { name: '백엔드 AI 선택', exact: true })).toBeDisabled();
   await expect(page.getByRole('combobox', { name: '계획·탐색 모델', exact: true })).toBeDisabled();
+  await expect(page.getByLabel('검사 예산 (USD)', { exact: true })).toBeDisabled();
+  await expect(page.getByLabel('탐색 시간 (분)', { exact: true })).toBeDisabled();
+  await page.getByText('백엔드 고급 검사 설정', { exact: true }).click();
+  await expect(page.getByLabel('동시 검사 실행 수', { exact: true })).toBeDisabled();
+  await expect(page.getByLabel('백엔드 추론 수준', { exact: true })).toBeDisabled();
   await expect(page.getByLabel('백엔드 전용 Anthropic API 키', { exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: '백엔드 연결 확인', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: '백엔드 설정 저장', exact: true })).toBeDisabled();
+});
+
+test('QA backend defaults persist and apply only to new plans while per-run overrides stay independent', async ({ page }) => {
+  test.setTimeout(60000);
+  await nativeFixture(page);
+  await page.goto('/');
+  await send(page, 'https://example.com 기존 검사 계획');
+  await expect(page.getByRole('region', { name: '버그 탐색 계획' })).toBeVisible();
+  const original = await page.evaluate(() => JSON.parse(localStorage.getItem('webpilot.conversations.v1')!)[0].messages.at(-1).plan.backendOptions);
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '실제 검사 백엔드', exact: true }).click();
+  await page.getByRole('combobox', { name: '백엔드 AI 선택', exact: true }).selectOption('openai');
+  await page.getByRole('combobox', { name: '계획·탐색 모델', exact: true }).selectOption('gpt-6.2-astra');
+  await page.getByRole('combobox', { name: '판정·보고서 모델', exact: true }).selectOption('gpt-6.2-sol');
+  await page.getByLabel('검사 예산 (USD)', { exact: true }).fill('9.5');
+  await page.getByLabel('탐색 시간 (분)', { exact: true }).fill('18');
+  await page.getByLabel('최대 방문 페이지', { exact: true }).fill('14');
+  await page.getByText('백엔드 고급 검사 설정', { exact: true }).click();
+  for (const [label, number] of [['최대 페이지 종류', '6'], ['페이지 종류별 탐색 턴', '11'], ['대화별 최대 턴', '27'], ['종류별 검사 페이지', '2'], ['동시 탐색·판정 수', '2'], ['동시 검사 실행 수', '3']]) {
+    await page.getByLabel(label, { exact: true }).fill(number);
+  }
+  await page.getByLabel('백엔드 추론 수준', { exact: true }).selectOption('high');
+  await page.getByLabel('백엔드 탐색 묶음', { exact: true }).selectOption('cluster');
+  const defaults = { budgetUsd: 9.5, exploreMinutes: 18, maxPages: 14, maxTemplates: 6, turnsPerTemplate: 11, maxTurns: 27, pagesPerTemplate: 2, concurrency: 2, workers: 3, planEffort: 'high', sessions: 'cluster' };
+  const selected = { provider: 'openai', models: { plan: 'gpt-6.2-astra', triage: 'gpt-6.2-sol' } };
+  await page.getByRole('button', { name: '백엔드 설정 저장', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.backendSaved)).toEqual([{ ...selected, runDefaults: defaults }]);
+  expect(await page.evaluate(() => (window as any).__native.saved)).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__native.backendTested)).toEqual([]);
+  await page.keyboard.press('Escape');
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('webpilot.conversations.v1')!)[0].messages.at(-1).plan.backendOptions)).toEqual(original);
+
+  await page.reload();
+  await page.locator('.history-select').filter({ hasText: '기존 검사 계획' }).click();
+  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
+  await expect(page.getByLabel('검사 예산 (USD)', { exact: true })).toHaveValue('10');
+  await expect(page.getByLabel('백엔드 AI', { exact: true })).toHaveValue('anthropic');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '실제 검사 백엔드', exact: true }).click();
+  await expect(page.getByLabel('검사 예산 (USD)', { exact: true })).toHaveValue('9.5');
+  await expect(page.getByRole('combobox', { name: '백엔드 AI 선택', exact: true })).toHaveValue('openai');
+  await page.getByText('백엔드 고급 검사 설정', { exact: true }).click();
+  await expect(page.getByLabel('백엔드 추론 수준', { exact: true })).toHaveValue('high');
+  await page.getByRole('group', { name: '새 테스트의 기본 검사 설정', exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: 'screenshots/backend-default-settings-102.png', animations: 'disabled' });
+  await page.keyboard.press('Escape');
+
+  await page.getByRole('button', { name: '새 채팅', exact: true }).click();
+  await send(page, 'https://example.org 새 기본값 검사');
+  const savedPlan = () => page.evaluate(() => JSON.parse(localStorage.getItem('webpilot.conversations.v1')!)[0].messages.at(-1).plan.backendOptions);
+  await expect.poll(savedPlan).toEqual({ ...selected, ...defaults });
+  await page.getByRole('button', { name: '설정 바꾸기', exact: true }).click();
+  await expect(page.getByLabel('검사 예산 (USD)', { exact: true })).toHaveValue('9.5');
+  await page.getByLabel('검사 예산 (USD)', { exact: true }).fill('7.25');
+  await page.getByRole('button', { name: '설정 적용', exact: true }).click();
+  await page.getByRole('button', { name: '시작하기', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__native.requests.length)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__native.requests[0])).toMatchObject({ provider: 'openai', model: 'gpt-6-luna', backendOptions: { ...selected, ...defaults, budgetUsd: 7.25 } });
+  expect(await page.evaluate(() => (window as any).__backendSettings.runDefaults)).toEqual(defaults);
+  expect(await page.evaluate(() => (window as any).__native.backendSaved)).toEqual([]);
+});
+
+test('invalid QA backend defaults never reach native storage and drafts are discarded on reopen', async ({ page }) => {
+  await nativeFixture(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '실제 검사 백엔드', exact: true }).click();
+  await page.getByLabel('검사 예산 (USD)', { exact: true }).fill('0');
+  await page.getByRole('button', { name: '백엔드 설정 저장', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('검사 예산 (USD)');
+  expect(await page.evaluate(() => (window as any).__native.backendSaved)).toEqual([]);
+  await page.getByLabel('검사 예산 (USD)', { exact: true }).fill('4');
+  await page.getByText('백엔드 고급 검사 설정', { exact: true }).click();
+  await page.getByLabel('동시 검사 실행 수', { exact: true }).fill('1.5');
+  await page.getByRole('button', { name: '백엔드 설정 저장', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('동시 검사 실행 수');
+  expect(await page.evaluate(() => (window as any).__native.backendSaved)).toEqual([]);
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'QA팀 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '실제 검사 백엔드', exact: true }).click();
+  await expect(page.getByLabel('검사 예산 (USD)', { exact: true })).toHaveValue('10');
+  await page.getByText('백엔드 고급 검사 설정', { exact: true }).click();
+  await expect(page.getByLabel('동시 검사 실행 수', { exact: true })).toHaveValue('1');
 });
 
 test('unreadable backend settings remain unknown and can reload without changing visual settings', async ({ page }) => {

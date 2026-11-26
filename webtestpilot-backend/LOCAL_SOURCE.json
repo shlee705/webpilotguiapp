@@ -1231,8 +1231,8 @@
   },
   "localIntegration": {
     "date": "2026-11-26",
-    "guiVersion": "1.0.1",
-    "purpose": "Local desktop 1.0.1 integration: backend-driven visual execution without action quota, real execution worker progress, verified per-run parameters and reports, transient authenticated inspection, separate Claude/OpenAI roles. No upstream writes.",
+    "guiVersion": "1.0.2",
+    "purpose": "Local desktop 1.0.2 integration: backend-driven visual execution without action quota, real execution worker progress, verified per-run parameters and reports, transient authenticated inspection, separate Claude/OpenAI roles. No upstream writes.",
     "modifiedUpstreamFiles": [
       {
         "path": "qa/src/agent.ts",

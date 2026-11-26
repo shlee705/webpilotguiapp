@@ -10,7 +10,34 @@ const BACKEND_DEFAULT_MODELS = Object.freeze({
   openai: Object.freeze({ plan: 'gpt-6.2-sol', triage: 'gpt-6-luna' }),
 });
 const BACKEND_KEY_NAMES = Object.freeze({ openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY' });
+const BACKEND_RUN_DEFAULT_VARIABLES = Object.freeze({
+  budgetUsd: 'WEBPILOT_BACKEND_BUDGET_USD', exploreMinutes: 'WEBPILOT_BACKEND_EXPLORE_MINUTES',
+  maxPages: 'WEBPILOT_BACKEND_MAX_PAGES', maxTemplates: 'WEBPILOT_BACKEND_MAX_TEMPLATES',
+  turnsPerTemplate: 'WEBPILOT_BACKEND_TURNS_PER_TEMPLATE', maxTurns: 'WEBPILOT_BACKEND_MAX_TURNS',
+  pagesPerTemplate: 'WEBPILOT_BACKEND_PAGES_PER_TEMPLATE', concurrency: 'WEBPILOT_BACKEND_CONCURRENCY',
+  workers: 'WEBPILOT_BACKEND_WORKERS', planEffort: 'WEBPILOT_BACKEND_PLAN_EFFORT', sessions: 'WEBPILOT_BACKEND_SESSIONS',
+});
 const MAX_ENV_BYTES = 64 * 1024;
+
+function validateRunDefaults(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some(name => !Object.hasOwn(BACKEND_RUN_DEFAULT_VARIABLES, name))) {
+    throw new Error('백엔드 검사 기본값에는 허용된 예산·시간·페이지·턴·동시 실행 옵션만 저장할 수 있습니다.');
+  }
+  // Run options also import provider/model validators from this module. Load
+  // them after initialization to keep one validation contract without a cycle.
+  return require('./backend-run-options.cjs').validateBackendRunOptions(value);
+}
+function readRunDefaults(values) {
+  const defaults = {};
+  for (const [field, variable] of Object.entries(BACKEND_RUN_DEFAULT_VARIABLES)) {
+    if (!Object.hasOwn(values, variable)) continue;
+    defaults[field] = ['planEffort', 'sessions'].includes(field) ? values[variable] : Number(values[variable]);
+    try { validateRunDefaults({ [field]: defaults[field] }); }
+    catch { throw new Error(`백엔드 .env의 ${variable} 검사 기본값이 올바르지 않습니다. 해당 값을 수정하거나 삭제해 주세요.`); }
+  }
+  return validateRunDefaults(defaults);
+}
 
 function validateBackendProvider(value) {
   if (!BACKEND_PROVIDERS.includes(value)) throw new Error('실제 검사 백엔드의 GPT 또는 Claude를 선택해 주세요.');
@@ -76,23 +103,33 @@ function createBackendSettings({ backendRoot, environment = process.env, fileSys
     return { provider, profiles };
   }
   function get() {
-    const { provider, profiles: privateProfiles } = readConfiguration();
+    const snapshot = readSnapshot();
+    const { provider, profiles: privateProfiles } = readConfiguration(snapshot);
+    const runDefaults = readRunDefaults(snapshot.values);
     const profiles = Object.fromEntries(BACKEND_PROVIDERS.map(name => {
       const item = privateProfiles[name];
       return [name, { models: { ...item.models }, keyConfigured: Boolean(item.apiKey), savedKeyConfigured: Boolean(item.savedKey),
         keyHint: item.savedKey ? `•••• ${item.savedKey.slice(-4)}` : '', storage: 'env-file', source: item.source }];
     }));
-    return { provider, ...profiles[provider], profiles };
+    return { provider, ...profiles[provider], profiles, runDefaults: { ...runDefaults } };
   }
   function save(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input)
-      || Object.keys(input).some(name => !['provider', 'models', 'apiKey', 'forgetKey'].includes(name))) throw new Error('올바른 백엔드 전용 설정이 필요합니다.');
+      || Object.keys(input).some(name => !['provider', 'models', 'apiKey', 'forgetKey', 'runDefaults'].includes(name))) throw new Error('올바른 백엔드 전용 설정이 필요합니다.');
     if (input.forgetKey !== undefined && typeof input.forgetKey !== 'boolean') throw new Error('백엔드 키 삭제 설정이 올바르지 않습니다.');
     if (input.apiKey !== undefined && typeof input.apiKey !== 'string') throw new Error('올바른 백엔드 전용 API 키를 입력해 주세요.');
     if (input.forgetKey && input.apiKey?.trim()) throw new Error('백엔드 키 저장과 삭제를 동시에 요청할 수 없습니다.');
     const snapshot = readSnapshot();
     const provider = validateBackendProvider(input.provider ?? snapshot.values.WEBPILOT_BACKEND_PROVIDER ?? 'anthropic');
     const updates = { WEBPILOT_BACKEND_PROVIDER: provider };
+    if (input.runDefaults !== undefined) {
+      const runDefaults = validateRunDefaults(input.runDefaults);
+      for (const [field, variable] of Object.entries(BACKEND_RUN_DEFAULT_VARIABLES)) updates[variable] = String(runDefaults[field]);
+    } else {
+      // Reject an already-invalid snapshot before changing keys/models. A save
+      // with explicit defaults can still repair it atomically.
+      readRunDefaults(snapshot.values);
+    }
     if (input.models !== undefined) {
       if (!input.models || typeof input.models !== 'object' || Array.isArray(input.models)
         || Object.keys(input.models).some(role => !['plan', 'triage'].includes(role))) throw new Error('백엔드 계획·분류 모델 설정이 올바르지 않습니다.');
@@ -139,4 +176,4 @@ function createBackendSettings({ backendRoot, environment = process.env, fileSys
 }
 
 module.exports = { createBackendSettings, validateBackendKey, validateBackendModel, validateBackendProvider,
-  parseBackendEnv, BACKEND_DEFAULT_MODELS, BACKEND_KEY_NAMES };
+  parseBackendEnv, BACKEND_DEFAULT_MODELS, BACKEND_KEY_NAMES, BACKEND_RUN_DEFAULT_VARIABLES };

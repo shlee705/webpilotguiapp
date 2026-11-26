@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, ExternalLink, Eye, EyeOff, LoaderCircle, Server, ShieldCheck } from 'lucide-react';
-import type { ApiProvider, BackendSettings } from '../types';
+import type { ApiProvider, BackendRunOptions, BackendSettings } from '../types';
 import { modelsForProvider, PROVIDERS } from '../lib/models';
+import { BACKEND_RUN_DEFAULTS, normalizeBackendDefaults } from '../lib/backend-options';
+import BackendLimitFields from './BackendLimitFields';
 
 interface Props { running: boolean; onBusyChange: (busy: boolean) => void }
 type ModelPair = { plan: string; triage: string };
@@ -29,6 +31,7 @@ export default function BackendSettingsPanel({ running, onBusyChange }: Props) {
   const [settings, setSettings] = useState<BackendSettings | null>(null);
   const [provider, setProvider] = useState<ApiProvider>('anthropic');
   const [models, setModels] = useState<Record<ApiProvider, ModelPair>>(DEFAULT_MODELS);
+  const [runDefaults, setRunDefaults] = useState<BackendRunOptions>({ ...BACKEND_RUN_DEFAULTS });
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [key, setKey] = useState('');
@@ -48,9 +51,11 @@ export default function BackendSettingsPanel({ running, onBusyChange }: Props) {
     try {
       if (!window.pilotDesktop?.getBackendSettings) throw new Error();
       const result = await window.pilotDesktop.getBackendSettings();
+      const defaults = normalizeBackendDefaults(result.runDefaults);
       if (mounted.current) {
         setSettings(result); setProvider(result.provider);
         setModels({ openai: { ...result.profiles.openai.models }, anthropic: { ...result.profiles.anthropic.models } });
+        setRunDefaults(defaults);
       }
     } catch {
       if (mounted.current) { setSettings(null); setLoadError('백엔드 설정 상태를 확인하지 못했습니다. 다시 확인해 주세요.'); }
@@ -67,16 +72,22 @@ export default function BackendSettingsPanel({ running, onBusyChange }: Props) {
   const trimmedModels = () => ({ plan: selectedModels.plan.trim(), triage: selectedModels.triage.trim() });
   async function save(forgetKey = false) {
     if (!window.pilotDesktop || pending || !settings || running) return;
+    let defaults;
+    if (!forgetKey) {
+      try { defaults = normalizeBackendDefaults(runDefaults); }
+      catch (error) { setFailed(true); setNotice(error instanceof Error ? error.message : '기본 검사 설정을 확인해 주세요.'); return; }
+    }
     setPending(forgetKey ? 'remove' : 'save'); clearNotice();
     try {
       const saved = await window.pilotDesktop.saveBackendSettings(forgetKey ? { provider, forgetKey: true }
-        : { provider, models: trimmedModels(), ...(key.trim() ? { apiKey: key.trim() } : {}) });
+        : { provider, models: trimmedModels(), runDefaults: defaults, ...(key.trim() ? { apiKey: key.trim() } : {}) });
       setSettings(saved); setKey(''); setVisible(false);
       setModels(current => ({ ...current, [provider]: { ...saved.profiles[provider].models } }));
+      if (!forgetKey) setRunDefaults(normalizeBackendDefaults(saved.runDefaults));
       setNotice(forgetKey
         ? saved.profiles[provider].keyConfigured ? '.env의 백엔드 키를 삭제했습니다. 별도로 설정된 환경변수의 키는 유지됩니다.' : '.env의 백엔드 키를 삭제했습니다.'
-        : saved.profiles[provider].source === 'environment' ? '백엔드 모델과 키를 .env에 저장했습니다. 현재 실행에서는 환경변수의 키가 우선 사용됩니다.' : '실제 검사 백엔드 설정을 .env에 저장했습니다. 화면 표현 AI 설정은 바뀌지 않습니다.');
-    } catch { setFailed(true); setNotice(forgetKey ? '백엔드 API 키를 삭제하지 못했습니다.' : '백엔드 설정을 저장하지 못했습니다. 모델 ID와 키, 저장 공간을 확인해 주세요.'); }
+        : saved.profiles[provider].source === 'environment' ? '백엔드 설정과 검사 기본값을 .env에 저장했습니다. 현재 실행에서는 환경변수의 키가 우선 사용됩니다.' : '실제 검사 백엔드 설정과 검사 기본값을 .env에 저장했습니다. 새 테스트부터 적용됩니다.');
+    } catch { setFailed(true); setNotice(forgetKey ? '백엔드 API 키를 삭제하지 못했습니다.' : '백엔드 설정을 저장하지 못했습니다. 검사 기본값, 모델 ID와 키, 저장 공간을 확인해 주세요.'); }
     finally { setPending(null); }
   }
   async function test() {
@@ -102,6 +113,11 @@ export default function BackendSettingsPanel({ running, onBusyChange }: Props) {
           <div className="settings-section"><label className="field-label" htmlFor="backend-provider">백엔드 AI 선택</label><select id="backend-provider" value={provider} onChange={event => changeProvider(event.target.value as ApiProvider)} disabled={!!pending || running}><option value="anthropic">Claude (Anthropic)</option><option value="openai">GPT (OpenAI)</option></select></div>
           <ModelField stage="plan" provider={provider} value={selectedModels.plan} onChange={value => changeModel('plan', value)} disabled={!!pending || running} />
           <ModelField stage="triage" provider={provider} value={selectedModels.triage} onChange={value => changeModel('triage', value)} disabled={!!pending || running} />
+          <fieldset className="tour-backend-fields backend-default-fields" disabled={!!pending || running}>
+            <legend>새 테스트의 기본 검사 설정</legend>
+            <p className="tour-editor-note">위의 백엔드 AI·모델과 아래 값을 새 테스트의 기본값으로 사용합니다. 각 테스트에서 따로 변경할 수 있으며, 기존 테스트 설정은 유지됩니다.</p>
+            <BackendLimitFields value={runDefaults} onChange={value => { setRunDefaults(value); clearNotice(); }} idPrefix="default" disabled={!!pending || running} />
+          </fieldset>
           <div className="settings-section backend-key-status"><span className="field-label">선택한 서비스의 백엔드 키</span><strong>{profile.keyConfigured ? '키 설정됨' : '키 설정 필요'}</strong><p>{source}</p></div>
           <div className="settings-section"><div className="setting-label-row"><label htmlFor="backend-api-key">백엔드 전용 {providerInfo.name} API 키</label><a href={providerInfo.keyUrl} target="_blank" rel="noreferrer">키 발급 <ExternalLink size={11} /></a></div>
             <div className="api-key-field"><input id="backend-api-key" type={visible ? 'text' : 'password'} value={key} onChange={event => { setKey(event.target.value); clearNotice(); }} placeholder={profile.savedKeyConfigured ? `저장됨 ${profile.keyHint} · 변경할 백엔드 키 입력` : `백엔드에서만 사용할 ${provider === 'anthropic' ? 'sk-ant-...' : 'sk-...'}`} autoComplete="off" spellCheck={false} disabled={!!pending || running} maxLength={1024} /><button className="icon-button" onClick={() => setVisible(value => !value)} aria-label={visible ? '백엔드 API 키 숨기기' : '백엔드 API 키 보기'}>{visible ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>

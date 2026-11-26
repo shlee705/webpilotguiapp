@@ -179,6 +179,10 @@
 .tour-backend-fields legend { padding: 0 6px; }
 .tour-backend-fields .tour-editor-note { margin-top: 0; }
 .tour-backend-fields .tour-editor-grid { margin-top: 12px; }
+.backend-default-fields label { display: block; margin: 0 0 8px; color: #777783; font-size: 11px; line-height: 1.6; }
+.backend-default-fields input, .backend-default-fields select { display: block; width: 100%; min-width: 0; padding: 10px 11px; border: 1px solid #dddde6; border-radius: 8px; background: #fff; color: #4b4b57; font: inherit; font-size: 12px; line-height: 1.7; }
+.backend-default-fields input:focus, .backend-default-fields select:focus { outline: none; border-color: #aaaab8; box-shadow: 0 0 0 3px #6b6b880b; }
+.backend-default-fields input:disabled, .backend-default-fields select:disabled { opacity: .6; }
 .backend-primary-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .tour-backend-advanced { margin-top: 13px; }
 .tour-backend-advanced summary { cursor: pointer; font-size: 11px; color: #60606e; }

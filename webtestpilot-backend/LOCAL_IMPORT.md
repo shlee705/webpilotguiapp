@@ -55,7 +55,7 @@ npm test --prefix qa
 
 ## GUI 연동에 필요한 계약
 
-현재 GUI 1.0.1은 이 CLI를 별도 Node 프로세스로 실행한다. 내부 `--desktop-events --output-dir` 옵션과 Node IPC로 진행 위치·단계를 받고, 실행별 PDF를 검증한 후 첨부한다. HTTP 서버는 필요하지 않다. 앱 사용법과 설치는 [상위 README](../README.md)를 따른다.
+현재 GUI 1.0.2은 이 CLI를 별도 Node 프로세스로 실행한다. 내부 `--desktop-events --output-dir` 옵션과 Node IPC로 진행 위치·단계를 받고, 실행별 PDF를 검증한 후 첨부한다. HTTP 서버는 필요하지 않다. 앱 사용법과 설치는 [상위 README](../README.md)를 따른다.
 
 | 항목 | 백엔드의 현재 동작 / 연동 시 처리 |
 |---|---|

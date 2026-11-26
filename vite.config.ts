@@ -31,5 +31,10 @@ function pdfAssets(): Plugin {
 export default defineConfig({
   plugins: [react(), pdfAssets()],
   base: './',
-  server: { host: '127.0.0.1', port: 5173, strictPort: true },
+  server: {
+    host: '127.0.0.1', port: 5173, strictPort: true,
+    // Bundled browsers and publish checkouts are not renderer inputs. Watching
+    // their locked binaries can prevent the Windows development server starting.
+    watch: { ignored: ['**/release/**', '**/artifacts/**', '**/webtestpilot-backend/**'] },
+  },
 });

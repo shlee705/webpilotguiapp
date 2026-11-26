@@ -41,6 +41,7 @@ export interface BackendProfile {
 export interface BackendSettings extends BackendProfile {
   provider: ApiProvider;
   profiles: Record<ApiProvider, BackendProfile>;
+  runDefaults?: BackendRunDefaults;
 }
 
 export interface BackendRunOptions {
@@ -58,6 +59,8 @@ export interface BackendRunOptions {
   planEffort?: 'low' | 'medium' | 'high';
   sessions?: 'template' | 'cluster';
 }
+
+export type BackendRunDefaults = Required<Omit<BackendRunOptions, 'provider' | 'models'>>;
 
 export interface AgentStep {
   id: string;
